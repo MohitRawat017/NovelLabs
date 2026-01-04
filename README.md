@@ -199,3 +199,26 @@ MIT License - See LICENSE file for details.
 ## Disclaimer
 
 This tool is for personal use only. Users are responsible for complying with website terms of service and copyright laws.
+
+## Future Goals
+
+This project is actively being developed with ambitious expansion plans:
+
+### Audio Models & TTS Enhancement
+- **Coqui TTS Support**: Integrate open-source Coqui TTS as a lighter alternative to Kokoro
+- **Custom Voice Fine-tuning**: Implement transfer learning to create custom voices from small audio samples
+- **Real-time Streaming TTS**: Enable chunk-by-chunk audio streaming for faster user feedback
+
+### Performance & Optimization
+- **Multi-GPU Support**: Scale processing across multiple GPUs for batch operations
+- **Quantization**: Implement model quantization for deployment on edge devices
+- **Caching & CDN Integration**: Cache generated audio and serve via CDN for faster distribution
+- **Batch Optimization**: Adaptive batching based on available VRAM
+
+### Features & Functionality
+- **Web UI Dashboard**: Build a full-featured web interface for easy audio generation
+- **Audio Post-processing**: Add audio enhancement, compression, and normalization
+- **Chapter Bookmarking**: Implement bookmarks and progress tracking
+- **Audiobook Metadata**: Support for cover art, chapter metadata, and publishing info
+- **Format Support**: Add support for MP3, FLAC, and other audio formats
+- **Playlist Generation**: Create m3u playlists for seamless chapter playback
