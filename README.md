@@ -1,32 +1,65 @@
-# Novel Scraper
+# AudioBook Generator
 
-A production-grade web scraper for extracting novel chapters from supported websites. Built with Python, Selenium, and undetected-chromedriver for reliable content extraction with anti-detection measures.
+A complete audiobook production pipeline that scrapes web novels, segments text intelligently, and generates high-quality audio using Kokoro TTS with GPU acceleration.
 
 ## Features
 
-- ✅ **Cloudflare Bypass** - Automated detection avoidance
-- ✅ **Resume Support** - Skip already downloaded chapters
-- ✅ **Error Handling** - Comprehensive logging and error recovery
-- ✅ **Clean Output** - Well-formatted text files with chapter titles
-- ✅ **Rate Limiting** - Polite scraping with configurable delays
-- ✅ **Production Ready** - Type hints, docstrings, and proper structure
+- **Web Scraping** - Automated chapter extraction with CloudFlare bypass
+- **Smart Segmentation** - Sentence-aware chunking optimized for TTS (250 char max)
+- **Multi-language TTS** - 53 voices across 9 languages via Kokoro TTS
+- **GPU Acceleration** - CUDA support for faster processing
+- **Batch Processing** - Handle single files, chapters, or entire novels
+- **Resume Support** - Skip already processed content
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- NVIDIA GPU with CUDA (optional, CPU supported)
+- Chrome browser
+
+### Installation
+
+1. Clone and setup environment:
+```bash
+git clone <repository-url>
+cd audioBook
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+```
+
+2. Install PyTorch with CUDA:
+```bash
+# CUDA 12.1
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# CUDA 11.8
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# CPU only
+pip install torch torchvision torchaudio
+```
+
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
+python -m spacy download en_core_web_sm
+```
 
 ## Project Structure
 
 ```
 audioBook/
 ├── src/
-│   ├── __init__.py          # Package initialization
-│   ├── scraper.py           # Main scraper implementation
-│   └── config.py            # Configuration settings
-├── data/
-│   └── output/              # Downloaded chapters
-├── docs/                    # Additional documentation
-├── tests/                   # Unit tests
-├── logs/                    # Application logs
-├── requirements.txt         # Python dependencies
-├── .gitignore              # Git ignore rules
-└── README.md               # This file
+│   ├── main.py         # TTS generator (entry point)
+│   ├── scraper.py      # Web scraper
+│   ├── segmenter.py    # Text segmentation
+│   └── config.py       # Configuration
+├── data/output/        # Scraped chapters
+├── Segmentor/output/   # Segmented JSON files
+├── audio/              # Generated audiobooks
+└── docs/               # Documentation
 ```
 
 ## Installation
@@ -64,99 +97,89 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
+### Usage
 
-### Basic Usage
-
-Run the scraper interactively:
-
+**1. Scrape Novel Chapters**
 ```bash
 python src/scraper.py
 ```
+Enter TOC URL and chapter range when prompted.
 
-You'll be prompted to enter:
-- Novel TOC URL (e.g., `https://novelhi.com/s/index/Novel-Name`)
-- Start chapter number
-- End chapter number
-
-### Programmatic Usage
-
-```python
-from src.scraper import NovelScraper
-
-scraper = NovelScraper(headless=True)
-scraper.scrape_range(
-    toc_url="https://novelhi.com/s/index/Novel-Name",
-    start=1,
-    end=100
-)
+**2. Segment Text**
+```bash
+python src/segmenter.py
 ```
+Processes scraped chapters into TTS-optimized chunks.
 
-### Configuration
+**3. Generate Audio**
+```bash
+python src/main.py
+```
+Select processing mode and voice, then generate audiobooks.
 
-Modify `src/config.py` to customize:
+## Audio Generation Modes
+
+1. **Single File** - Process one JSON segment
+2. **Full Novel** - Process all chapters in a folder
+3. **Batch** - Process all novels in Segmentor/output
+4. **Range** - Process specific chapter range (e.g., 100-200)
+
+## Available Voices
+
+- 🇺🇸 American English (19 voices)
+- 🇬🇧 British English (8 voices)
+- 🇫🇷 French (1 voice)
+- 🇮🇹 Italian (2 voices)
+- 🇯🇵 Japanese (5 voices)
+- 🇨🇳 Mandarin (8 voices)
+- 🇪🇸 Spanish (3 voices)
+- 🇮🇳 Hindi (4 voices)
+- 🇧🇷 Portuguese (3 voices)
+
+## Configuration
+
+Edit `src/config.py` to customize:
 - Output directories
 - Browser settings
+- Scraper parameters
 - Timeout values
 - Delay between requests
 
 ## Output Format
 
-Chapters are saved as individual text files:
-
+Generated audio files are saved as:
 ```
-data/output/Novel-Name/
-├── Chapter_0001.txt
-├── Chapter_0002.txt
-└── Chapter_0003.txt
-```
-
-Each file contains:
-```
-Chapter Title
-============================================================
-
-Chapter content here...
+audio/
+└── NovelName/
+    ├── Chapter_0001.wav
+    ├── Chapter_0002.wav
+    └── Chapter_0003.wav
 ```
 
-## Supported Websites
+Each chapter is a single combined audio file with automatic silence between text segments.
 
-Currently supports:
-- novelhi.com
+## Performance
 
-Additional sites can be added by extending the scraper class.
-
-## Error Handling
-
-- Failed chapters are logged in `_error_chapter_XXXX.txt` files
-- Existing chapters are automatically skipped
-- Graceful shutdown ensures browser cleanup
-
-## Best Practices
-
-1. **Be Respectful**: Use reasonable delays between requests
-2. **Check Terms**: Ensure scraping is allowed by the website's terms of service
-3. **Personal Use**: Only scrape for personal, non-commercial use
-4. **Rate Limiting**: Adjust delays in config if you encounter issues
+- **CPU**: ~2-3 seconds per chunk
+- **GPU**: ~0.5-1 second per chunk
+- **Chapter**: 5-15 minutes (depends on length)
 
 ## Troubleshooting
 
-### Chrome driver issues
+**GPU not detected:**
 ```bash
-# Manually specify Chrome version
+python -c "import torch; print(torch.cuda.is_available())"
+```
+
+**Chrome driver issues:**
+```bash
 pip install undetected-chromedriver --upgrade
 ```
 
-### Import errors
-```bash
-# Ensure you're in the correct directory
-cd audioBook
-python src/scraper.py
-```
-
-### Slow performance
-- Reduce `delay_between_chapters` in config (not recommended below 1.5s)
-- Enable headless mode: `NovelScraper(headless=True)`
+**Scraping blocked:**
+- Increase delays in `config.py`
+- Use non-headless mode
+- Check website terms of service
 
 ## Development
 
@@ -165,37 +188,14 @@ python src/scraper.py
 pytest tests/
 ```
 
-### Code Style
-This project follows PEP 8 guidelines. Format code with:
-```bash
-black src/
-```
-
 ## Contributing
 
-Contributions are welcome! Please read [CONTRIBUTING.md](docs/CONTRIBUTING.md) for details.
+See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines.
 
 ## License
 
-This project is provided for educational purposes. See [LICENSE](LICENSE) for details.
+MIT License - See LICENSE file for details.
 
 ## Disclaimer
 
-This tool is for personal use only. Users are responsible for complying with website terms of service and copyright laws. The authors assume no liability for misuse.
-
-## Changelog
-
-### Version 1.0.0 (2026-01-04)
-- Initial production release
-- Support for novelhi.com
-- Anti-detection measures implemented
-- Resume capability added
-- Error logging and recovery
-
-## Support
-
-For issues and feature requests, please open an issue on the repository.
-
----
-
-**Note**: Always respect website robots.txt and terms of service. Use responsibly.
+This tool is for personal use only. Users are responsible for complying with website terms of service and copyright laws.

@@ -1,3 +1,18 @@
+# Core Dependencies
+numpy
+torch
+soundfile
+
+# TTS
+kokoro>=0.9.2
+
+# NLP
+spacy
+
+# Web Scraping
 beautifulsoup4==4.12.3
 selenium==4.27.0
 undetected-chromedriver==3.5.3
+
+# Note: Install PyTorch separately with CUDA support
+# See SETUP.md for installation instructions

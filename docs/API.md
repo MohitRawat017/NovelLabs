@@ -1,9 +1,51 @@
 # API Documentation
 
-## NovelScraper Class
+## AudioBookGenerator
 
-### Overview
-Main scraper class for extracting novel chapters from supported websites.
+Main TTS generator class for processing JSON segments into audio.
+
+### Constructor
+
+```python
+AudioBookGenerator(voice="af_heart", output_dir="audio", use_gpu=True)
+```
+
+**Parameters:**
+- `voice` (str): Voice model ID
+- `output_dir` (str): Base output directory
+- `use_gpu` (bool): Enable GPU acceleration
+
+### Methods
+
+#### process_chapter()
+```python
+process_chapter(json_path: str, output_dir: str) -> dict
+```
+Process single JSON file into audio.
+
+**Returns:** `{'chapter_id': str, 'success': int, 'failed': int}`
+
+#### process_novel()
+```python
+process_novel(input_path: str, novel_name: Optional[str] = None) -> dict
+```
+Process all chapters in folder.
+
+**Returns:** `{'novel': str, 'processed': int, 'success': int, 'failed': int}`
+
+#### process_range()
+```python
+process_range(input_path: str, start: int, end: int, novel_name: Optional[str] = None) -> dict
+```
+Process specific chapter range.
+
+**Returns:** `{'range': str, 'processed': int, 'success': int, 'failed': int}`
+
+---
+
+## NovelScraper
+
+Web scraper for novel chapters.
 
 ### Constructor
 
@@ -11,134 +53,26 @@ Main scraper class for extracting novel chapters from supported websites.
 NovelScraper(headless: bool = True)
 ```
 
-**Parameters:**
-- `headless` (bool): Run browser in headless mode. Default: True
-
-**Example:**
-```python
-scraper = NovelScraper(headless=False)
-```
-
----
-
 ### Methods
 
-#### start_driver()
-Initialize Chrome WebDriver with anti-detection configuration.
-
-**Returns:** `uc.Chrome` - Configured WebDriver instance
-
-**Example:**
-```python
-driver = scraper.start_driver()
-```
-
----
-
-#### generate_chapter_urls()
-Generate chapter URLs from table of contents URL.
-
-```python
-generate_chapter_urls(toc_url: str, start: int, end: int) -> Tuple[List[str], str]
-```
-
-**Parameters:**
-- `toc_url` (str): Novel table of contents URL
-- `start` (int): Starting chapter number
-- `end` (int): Ending chapter number
-
-**Returns:** Tuple of (chapter_urls, novel_name)
-
-**Raises:** `ValueError` if URL format is invalid
-
-**Example:**
-```python
-urls, name = scraper.generate_chapter_urls(
-    "https://novelhi.com/s/index/Novel-Name",
-    1,
-    100
-)
-```
-
----
-
-#### scrape_chapter()
-Extract chapter content from a single URL.
-
-```python
-scrape_chapter(driver: uc.Chrome, url: str) -> Tuple[str, str]
-```
-
-**Parameters:**
-- `driver` (uc.Chrome): Active WebDriver instance
-- `url` (str): Chapter URL to scrape
-
-**Returns:** Tuple of (title, content)
-
-**Raises:** `ValueError` if content cannot be extracted
-
-**Example:**
-```python
-title, content = scraper.scrape_chapter(driver, chapter_url)
-```
-
----
-
 #### scrape_range()
-Scrape multiple chapters and save to disk.
-
 ```python
 scrape_range(toc_url: str, start: int, end: int, output_dir: str = "data/output")
 ```
-
-**Parameters:**
-- `toc_url` (str): Novel table of contents URL
-- `start` (int): Starting chapter number
-- `end` (int): Ending chapter number
-- `output_dir` (str): Output directory path. Default: "data/output"
-
-**Example:**
-```python
-scraper.scrape_range(
-    "https://novelhi.com/s/index/Novel-Name",
-    1,
-    50,
-    "custom/output/path"
-)
-```
+Scrape chapter range from table of contents.
 
 ---
 
-## Configuration
+## SmartSegmenter
 
-### Browser Settings (src/config.py)
+Text segmentation for TTS optimization.
 
+### Methods
+
+#### process_novel()
 ```python
-BROWSER_CONFIG = {
-    "window_size": "1920,1080",
-    "timeout": 15,
-    "delay_between_chapters": 2,
-}
+process_novel(novel_folder: str, output_base_dir: str = "Segmentor/output") -> dict
 ```
+Segment novel chapters into TTS-optimized chunks.
 
-### Scraper Settings
-
-```python
-SCRAPER_CONFIG = {
-    "min_content_length": 100,
-    "max_retries": 3,
-    "headless": False,
-}
-```
-
----
-
-## Error Handling
-
-All methods raise appropriate exceptions with descriptive messages:
-
-- `ValueError`: Invalid input or missing content
-- `TimeoutError`: Page load timeout
-- `Exception`: General errors with detailed messages
-
-Error files are saved to the output directory as `_error_chapter_XXXX.txt`.
+**Returns:** `{'processed': int, 'total_chunks': int}`

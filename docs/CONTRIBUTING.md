@@ -1,90 +1,46 @@
-# Contributing to Novel Scraper
+# Contributing Guidelines
 
-Thank you for your interest in contributing! This document provides guidelines for contributing to the project.
+## Development Setup
 
-## Getting Started
-
-1. Fork the repository
-2. Clone your fork: `git clone <your-fork-url>`
-3. Create a feature branch: `git checkout -b feature/your-feature-name`
+1. Fork and clone the repository
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Install development dependencies: `pip install -r requirements.txt`
 4. Make your changes
 5. Test thoroughly
 6. Commit with clear messages
-7. Push to your fork
-8. Open a Pull Request
+7. Push and create a Pull Request
 
 ## Code Standards
 
-### Python Style Guide
-
 - Follow PEP 8
-- Use type hints for function parameters and returns
-- Write docstrings for all public methods
-- Keep functions focused and under 50 lines when possible
-
-### Code Example
-
-```python
-def scrape_chapter(self, driver: uc.Chrome, url: str) -> Tuple[str, str]:
-    """
-    Extract chapter title and content from a single chapter URL.
-    
-    Args:
-        driver: Active Chrome WebDriver instance.
-        url: URL of the chapter to scrape.
-        
-    Returns:
-        Tuple containing chapter title and content text.
-    """
-    # Implementation here
-```
+- Use type hints
+- Keep functions under 50 lines
+- Write docstrings for public methods
+- No unnecessary comments
 
 ## Testing
 
-- Write unit tests for new features
-- Ensure all tests pass before submitting PR
-- Run tests with: `pytest tests/`
+Run tests before submitting:
+```bash
+pytest tests/
+```
 
-## Commit Messages
-
-Use clear, descriptive commit messages:
+## Commit Convention
 
 ```
-feat: Add support for new website
-fix: Resolve timeout issues in scraper
-docs: Update README installation instructions
-refactor: Improve error handling in scrape_chapter
+feat: Add new feature
+fix: Bug fix
+docs: Documentation
+refactor: Code restructure
+test: Add tests
 ```
 
 ## Pull Request Process
 
-1. Update README.md with any new features
-2. Update version number if applicable
-3. Describe changes clearly in PR description
-4. Link any related issues
-5. Wait for review and address feedback
-
-## Reporting Issues
-
-When reporting bugs, include:
-- Python version
-- Operating system
-- Steps to reproduce
-- Expected vs actual behavior
-- Error messages/logs
-
-## Feature Requests
-
-For new features:
-- Describe the use case
-- Explain the benefit
-- Provide examples if applicable
-
-## Code of Conduct
-
-- Be respectful and inclusive
-- Welcome newcomers
-- Focus on constructive feedback
-- Maintain professionalism
+1. Update README if adding features
+2. Ensure all tests pass
+3. Describe changes clearly
+4. Link related issues
+5. Wait for review
 
 Thank you for contributing!

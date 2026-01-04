@@ -1,10 +1,3 @@
-"""
-Novel Scraper - Production-grade web scraper for novel content.
-
-This module provides functionality to scrape novel chapters from supported websites
-using Selenium with undetected-chromedriver for reliable content extraction.
-"""
-
 import os
 import re
 import time
@@ -17,23 +10,10 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 class NovelScraper:
-    """
-    A production-grade scraper for extracting novel chapters from web sources.
-    
-    Attributes:
-        headless (bool): Whether to run browser in headless mode.
-    """
-    
     def __init__(self, headless: bool = True):
         self.headless = headless
 
     def start_driver(self) -> uc.Chrome:
-        """
-        Initialize and configure Chrome WebDriver with anti-detection measures.
-        
-        Returns:
-            uc.Chrome: Configured Chrome WebDriver instance.
-        """
         options = uc.ChromeOptions()
         options.headless = self.headless 
         

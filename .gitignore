@@ -70,11 +70,11 @@ chrome_profile/
 
 # Application data
 data/output/
+Segmentor/output/
+audio/
 logs/*.log
+setup.py
 
 # OS
 Thumbs.db
 desktop.ini
-
-# Scraped content (optional - uncomment to ignore)
-# data/output/**/*.txt
