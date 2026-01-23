@@ -60,6 +60,12 @@
     margin-top: var(--space-xs);
 }
 
+.optional-tag {
+    font-weight: 400;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
 .form-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -86,18 +92,61 @@
     }
 }
 
-/* Progress */
+/* Error Box */
+.error-box {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    background: rgba(245, 101, 101, 0.1);
+    border: 1px solid var(--error);
+    border-radius: var(--radius-md);
+    color: var(--error);
+    margin-bottom: var(--space-lg);
+    font-size: 0.9rem;
+}
+
+/* Progress Section */
 .progress-section {
-    margin-top: var(--space-xl);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--space-xl);
     text-align: center;
 }
 
+.progress-header {
+    margin-bottom: var(--space-xl);
+}
+
+.progress-header svg {
+    margin-bottom: var(--space-md);
+}
+
+.progress-header h2 {
+    margin-bottom: var(--space-sm);
+}
+
+.success-icon {
+    color: var(--success);
+}
+
+.error-icon {
+    color: var(--error);
+}
+
+.novel-title {
+    color: var(--accent-primary);
+    font-weight: 500;
+    margin: 0;
+}
+
 .progress-bar {
-    height: 8px;
+    height: 12px;
     background: var(--bg-tertiary);
     border-radius: var(--radius-full);
     overflow: hidden;
-    margin-bottom: var(--space-sm);
+    margin-bottom: var(--space-md);
 }
 
 .progress-fill {
@@ -110,5 +159,15 @@
 .progress-text {
     font-size: 0.9rem;
     color: var(--text-muted);
-    margin: 0;
+    margin: 0 0 var(--space-xl);
+}
+
+.progress-actions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.progress-actions .btn {
+    width: 100%;
 }

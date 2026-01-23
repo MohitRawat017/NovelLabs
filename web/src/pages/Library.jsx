@@ -1,40 +1,70 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, Filter, BookOpen } from 'lucide-react';
+import { Search, Filter, BookOpen, RefreshCw } from 'lucide-react';
+import { getNovels } from '../services/api';
 import './Library.css';
 
-// Mock data for now - will be replaced with API calls
-const mockNovels = [
-    {
-        id: 1,
-        slug: 'reverend-insanity',
-        title: 'Reverend Insanity',
-        cover: '/covers/reverend-insanity.jpg',
-        genres: ['Fantasy', 'Action', 'Adventure', 'Martial Arts'],
-        chapters: 2334,
-        description: 'Humans are clever in tens of thousands of ways, Gu are the true refined essences of Heaven and Earth.',
-        lastUpdated: '2 days ago'
-    }
-];
-
 function Library() {
+    const [novels, setNovels] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedGenre, setSelectedGenre] = useState('all');
 
     const genres = ['all', 'Fantasy', 'Action', 'Adventure', 'Romance', 'Mystery', 'Xianxia', 'Martial Arts'];
 
-    const filteredNovels = mockNovels.filter(novel => {
-        const matchesSearch = novel.title.toLowerCase().includes(searchQuery.toLowerCase());
-        const matchesGenre = selectedGenre === 'all' || novel.genres.includes(selectedGenre);
-        return matchesSearch && matchesGenre;
-    });
+    // Fetch novels from API
+    useEffect(() => {
+        fetchNovels();
+    }, [searchQuery, selectedGenre]);
+
+    const fetchNovels = async () => {
+        try {
+            setLoading(true);
+            const data = await getNovels({
+                search: searchQuery || undefined,
+                genre: selectedGenre !== 'all' ? selectedGenre : undefined,
+            });
+            setNovels(data.novels || []);
+            setError(null);
+        } catch (err) {
+            setError(err.message);
+            console.error('Failed to fetch novels:', err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Format relative time
+    const formatRelativeTime = (dateString) => {
+        if (!dateString) return 'Unknown';
+        const date = new Date(dateString);
+        const now = new Date();
+        const diffMs = now - date;
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+        if (diffDays === 0) return 'Today';
+        if (diffDays === 1) return 'Yesterday';
+        if (diffDays < 7) return `${diffDays} days ago`;
+        if (diffDays < 30) return `${Math.floor(diffDays / 7)} weeks ago`;
+        if (diffDays < 365) return `${Math.floor(diffDays / 30)} months ago`;
+        return `${Math.floor(diffDays / 365)} years ago`;
+    };
 
     return (
         <div className="library">
             <div className="library-container">
                 <header className="library-header">
-                    <h1>Novel Library</h1>
-                    <p className="text-muted">Browse your collection of scraped novels</p>
+                    <div className="header-content">
+                        <div>
+                            <h1>Novel Library</h1>
+                            <p className="text-muted">Browse your collection of scraped novels</p>
+                        </div>
+                        <button onClick={fetchNovels} className="btn btn-outline" disabled={loading}>
+                            <RefreshCw size={18} className={loading ? 'spin' : ''} />
+                            Refresh
+                        </button>
+                    </div>
                 </header>
 
                 <div className="library-filters">
@@ -63,39 +93,66 @@ function Library() {
                     </div>
                 </div>
 
-                <div className="novels-grid">
-                    {filteredNovels.map(novel => (
-                        <Link to={`/novel/${novel.slug}`} key={novel.id} className="novel-card">
-                            <div className="novel-cover">
-                                <div className="cover-placeholder">
-                                    <BookOpen size={48} />
-                                </div>
-                                <span className="update-badge">{novel.lastUpdated}</span>
-                            </div>
+                {error && (
+                    <div className="error-message">
+                        <p>Error: {error}</p>
+                        <button onClick={fetchNovels} className="btn btn-outline">Retry</button>
+                    </div>
+                )}
 
-                            <div className="novel-info">
-                                <h3 className="novel-title">{novel.title}</h3>
-                                <div className="novel-genres">
-                                    {novel.genres.slice(0, 3).map(genre => (
-                                        <span key={genre} className="badge">{genre}</span>
-                                    ))}
+                {loading && (
+                    <div className="loading-grid">
+                        {[1, 2, 3, 4].map(n => (
+                            <div key={n} className="novel-card skeleton-card">
+                                <div className="novel-cover skeleton"></div>
+                                <div className="novel-info">
+                                    <div className="skeleton skeleton-title"></div>
+                                    <div className="skeleton skeleton-text"></div>
                                 </div>
-                                <p className="novel-chapters">{novel.chapters} Chapters</p>
                             </div>
-                        </Link>
-                    ))}
+                        ))}
+                    </div>
+                )}
 
-                    {filteredNovels.length === 0 && (
-                        <div className="empty-state">
-                            <BookOpen size={64} />
-                            <h3>No novels found</h3>
-                            <p>Try adjusting your search or filters</p>
-                            <Link to="/scraper" className="btn btn-primary">
-                                Scrape a Novel
+                {!loading && (
+                    <div className="novels-grid">
+                        {novels.map(novel => (
+                            <Link to={`/novel/${novel.slug}`} key={novel.id} className="novel-card">
+                                <div className="novel-cover">
+                                    {novel.cover_url ? (
+                                        <img src={novel.cover_url} alt={novel.title} />
+                                    ) : (
+                                        <div className="cover-placeholder">
+                                            <BookOpen size={48} />
+                                        </div>
+                                    )}
+                                    <span className="update-badge">{formatRelativeTime(novel.last_updated)}</span>
+                                </div>
+
+                                <div className="novel-info">
+                                    <h3 className="novel-title">{novel.title}</h3>
+                                    <div className="novel-genres">
+                                        {(novel.genres || '').split(',').slice(0, 3).map(genre => (
+                                            <span key={genre} className="badge">{genre.trim()}</span>
+                                        ))}
+                                    </div>
+                                    <p className="novel-chapters">{novel.chapter_count} Chapters</p>
+                                </div>
                             </Link>
-                        </div>
-                    )}
-                </div>
+                        ))}
+
+                        {novels.length === 0 && !error && (
+                            <div className="empty-state">
+                                <BookOpen size={64} />
+                                <h3>No novels found</h3>
+                                <p>Try adjusting your search or scrape a new novel</p>
+                                <Link to="/scraper" className="btn btn-primary">
+                                    Scrape a Novel
+                                </Link>
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
         </div>
     );

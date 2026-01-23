@@ -13,8 +13,50 @@
     margin-bottom: var(--space-xl);
 }
 
+.header-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
 .library-header h1 {
     margin-bottom: var(--space-xs);
+}
+
+/* Loading States */
+.loading-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-lg);
+}
+
+.skeleton-card {
+    pointer-events: none;
+}
+
+.skeleton-card .novel-cover {
+    height: 260px;
+}
+
+.skeleton-title {
+    height: 20px;
+    width: 80%;
+    margin-bottom: var(--space-sm);
+}
+
+.skeleton-text {
+    height: 14px;
+    width: 60%;
+}
+
+.error-message {
+    text-align: center;
+    padding: var(--space-xl);
+    color: var(--error);
+}
+
+.error-message p {
+    margin-bottom: var(--space-md);
 }
 
 /* Filters */
