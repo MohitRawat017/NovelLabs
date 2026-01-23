@@ -14,5 +14,10 @@ beautifulsoup4==4.12.3
 selenium==4.27.0
 undetected-chromedriver==3.5.3
 
+# Web Backend (FastAPI)
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+
 # Note: Install PyTorch separately with CUDA support
 # See SETUP.md for installation instructions

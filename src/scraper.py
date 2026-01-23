@@ -15,7 +15,6 @@ class NovelScraper:
 
     def start_driver(self) -> uc.Chrome:
         options = uc.ChromeOptions()
-        options.headless = self.headless 
         
         if self.headless:
             options.add_argument("--headless=new")
@@ -27,22 +26,116 @@ class NovelScraper:
         options.add_argument("--window-size=1920,1080")
 
         print("[INFO] Initializing Chrome WebDriver...")
-        return uc.Chrome(options=options)
+        # Use version_main to match Chrome browser version (143)
+        return uc.Chrome(options=options, version_main=143)
 
     def generate_chapter_urls(self, toc_url: str, start: int, end: int) -> Tuple[List[str], str]:
+        # Handle multiple URL formats:
+        # - https://novelhi.com/s/index/Novel-Name
+        # - https://novelhi.com/s/Novel-Name
+        # - https://novelhi.com/s/Novel-Name/123 (chapter URL)
+        
         novel_name = toc_url.rstrip("/").split("/")[-1]
-        base_parts = toc_url.split("/s/index/")
         
-        if len(base_parts) != 2:
-            raise ValueError("Invalid TOC URL format. Expected: https://novelhi.com/s/index/Novel-Name")
+        # Remove chapter number if present (numeric ending)
+        if novel_name.isdigit():
+            parts = toc_url.rstrip("/").split("/")
+            novel_name = parts[-2] if len(parts) >= 2 else novel_name
         
-        base_url = base_parts[0]
+        # Extract base URL
+        if "/s/index/" in toc_url:
+            base_url = toc_url.split("/s/index/")[0]
+        elif "/s/" in toc_url:
+            base_url = toc_url.split("/s/")[0]
+        else:
+            raise ValueError("Invalid URL format. Expected novelhi.com URL with /s/ path")
+        
         chapter_urls = [f"{base_url}/s/{novel_name}/{num}" for num in range(start, end + 1)]
         
         print(f"[INFO] Generated {len(chapter_urls)} chapter URLs")
         print(f"[DEBUG] Range: {chapter_urls[0]} to {chapter_urls[-1]}")
         
         return chapter_urls, novel_name
+
+    def get_novel_name(self, toc_url: str) -> str:
+        """Extract novel name from URL"""
+        novel_name = toc_url.rstrip("/").split("/")[-1]
+        if novel_name.isdigit():
+            parts = toc_url.rstrip("/").split("/")
+            novel_name = parts[-2] if len(parts) >= 2 else novel_name
+        return novel_name
+
+    def get_total_chapters(self, driver: uc.Chrome, toc_url: str) -> int:
+        """Scrape the TOC page to find total chapter count"""
+        novel_name = self.get_novel_name(toc_url)
+        
+        # Build TOC URL - use index page format
+        if "/s/index/" in toc_url:
+            index_url = toc_url
+        elif "/s/" in toc_url:
+            base_url = toc_url.split("/s/")[0]
+            index_url = f"{base_url}/s/index/{novel_name}"
+        else:
+            raise ValueError(f"Invalid URL format: {toc_url}")
+        
+        print(f"[INFO] Fetching chapter count from: {index_url}")
+        driver.get(index_url)
+        
+        try:
+            # Wait for page to load
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/s/']"))
+            )
+            time.sleep(3)  # Extra wait for dynamic content
+            
+            # Try multiple selector patterns
+            selectors = [
+                f"a[href*='/s/{novel_name}/']",
+                f"a[href$='/{novel_name}/']",
+                "a[href*='/s/'][href$='/1']",  # Links ending with /1
+            ]
+            
+            max_chapter = 0
+            
+            for selector in selectors:
+                try:
+                    chapter_links = driver.find_elements(By.CSS_SELECTOR, selector)
+                    print(f"[DEBUG] Selector '{selector}' found {len(chapter_links)} links")
+                    
+                    for link in chapter_links:
+                        href = link.get_attribute("href")
+                        if href:
+                            # Extract chapter number from URL
+                            parts = href.rstrip("/").split("/")
+                            if parts:
+                                last_part = parts[-1]
+                                if last_part.isdigit():
+                                    chapter_num = int(last_part)
+                                    max_chapter = max(max_chapter, chapter_num)
+                except Exception:
+                    continue
+                
+                if max_chapter > 0:
+                    break
+            
+            if max_chapter == 0:
+                # Try getting text-based chapter count
+                page_text = driver.page_source
+                import re
+                # Look for patterns like "Chapter 2345" or "2345 Chapters"
+                matches = re.findall(r'(?:Chapter\s+)?(\d{3,})', page_text)
+                if matches:
+                    max_chapter = max(int(m) for m in matches)
+            
+            if max_chapter == 0:
+                raise ValueError("No chapters found on the TOC page")
+            
+            print(f"[INFO] Found {max_chapter} total chapters")
+            return max_chapter
+            
+        except Exception as e:
+            print(f"[ERROR] Could not detect chapter count: {e}")
+            raise ValueError(f"Could not detect total chapters: {e}")
 
     def scrape_chapter(self, driver: uc.Chrome, url: str) -> Tuple[str, str]:
         driver.get(url)
