@@ -16,6 +16,34 @@ router = APIRouter()
 scrape_jobs: Dict[str, dict] = {}
 
 
+def run_scraper_with_detection(job_id: str, toc_url: str, start: int):
+    """Run detection + scraping in a background thread"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    
+    from scraper import NovelScraper
+    
+    try:
+        scraper = NovelScraper(headless=True)
+        driver = scraper.start_driver()
+        
+        try:
+            # Detect total chapters first
+            end_chapter = scraper.get_total_chapters(driver, toc_url)
+            scrape_jobs[job_id]['total_chapters'] = end_chapter - start + 1
+            print(f"[INFO] Detected {end_chapter} chapters, starting scrape from {start}")
+        finally:
+            driver.quit()
+        
+        # Now run the actual scraper
+        run_scraper(job_id, toc_url, start, end_chapter)
+        
+    except Exception as e:
+        scrape_jobs[job_id]['status'] = 'failed'
+        scrape_jobs[job_id]['error'] = f"Detection failed: {str(e)}"
+        print(f"[ERROR] Detection failed: {e}")
+
+
 def run_scraper(job_id: str, toc_url: str, start: int, end: int):
     """Run the scraper in a background thread"""
     import sys
@@ -73,6 +101,13 @@ def run_scraper(job_id: str, toc_url: str, start: int, end: int):
             # Only mark completed if not cancelled
             if scrape_jobs[job_id].get('status') != 'cancelled':
                 scrape_jobs[job_id]['status'] = 'completed'
+                # Sync to database so novel appears in library
+                try:
+                    from .novels import sync_novels_to_db
+                    sync_novels_to_db()
+                    print(f"[INFO] Library synced after scraping {novel_name}")
+                except Exception as e:
+                    print(f"[WARN] Failed to sync library: {e}")
             
         finally:
             driver.quit()
@@ -88,13 +123,12 @@ async def start_scraping(request: ScrapeRequest, background_tasks: BackgroundTas
     import uuid
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from scraper import NovelScraper
     
     job_id = str(uuid.uuid4())
     
     end_chapter = request.end_chapter
     
-    # Auto-detect total chapters if not provided
+    # If auto-detect is needed, set status to detecting and run in background
     if end_chapter is None:
         scrape_jobs[job_id] = {
             'status': 'detecting',
@@ -104,18 +138,16 @@ async def start_scraping(request: ScrapeRequest, background_tasks: BackgroundTas
             'error': None
         }
         
-        try:
-            scraper = NovelScraper(headless=True)
-            driver = scraper.start_driver()
-            try:
-                end_chapter = scraper.get_total_chapters(driver, request.toc_url)
-            finally:
-                driver.quit()
-        except Exception as e:
-            scrape_jobs[job_id]['status'] = 'failed'
-            scrape_jobs[job_id]['error'] = f"Failed to detect total chapters: {e}"
-            return {"job_id": job_id, "message": "Failed to detect total chapters", "error": str(e)}
+        # Start detection + scraping in background
+        thread = threading.Thread(
+            target=run_scraper_with_detection,
+            args=(job_id, request.toc_url, request.start_chapter)
+        )
+        thread.start()
+        
+        return {"job_id": job_id, "message": "Detecting chapters...", "total_chapters": 0}
     
+    # If end_chapter provided, start scraping directly
     scrape_jobs[job_id] = {
         'status': 'pending',
         'current_chapter': 0,

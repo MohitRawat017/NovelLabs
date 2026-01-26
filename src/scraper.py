@@ -84,54 +84,63 @@ class NovelScraper:
         try:
             # Wait for page to load
             WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/s/']"))
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             time.sleep(3)  # Extra wait for dynamic content
             
-            # Try multiple selector patterns
-            selectors = [
-                f"a[href*='/s/{novel_name}/']",
-                f"a[href$='/{novel_name}/']",
-                "a[href*='/s/'][href$='/1']",  # Links ending with /1
+            page_source = driver.page_source
+            import re
+            
+            # Strategy 1: Look for "Content (N)" pattern in headers
+            content_match = re.search(r'Content\s*\((\d+)\)', page_source)
+            if content_match:
+                total = int(content_match.group(1))
+                print(f"[INFO] Found {total} chapters from Content header")
+                return total
+            
+            # Strategy 2: Look for chapter count in meta or title
+            count_patterns = [
+                r'(\d+)\s*chapters?',
+                r'chapters?\s*[:=]\s*(\d+)',
+                r'total\s*[:=]?\s*(\d+)',
             ]
+            for pattern in count_patterns:
+                match = re.search(pattern, page_source, re.IGNORECASE)
+                if match:
+                    total = int(match.group(1))
+                    if 10 <= total <= 10000:  # Reasonable chapter count range
+                        print(f"[INFO] Found {total} chapters from pattern match")
+                        return total
             
-            max_chapter = 0
+            # Strategy 3: Count chapter links on the page
+            chapter_links = driver.find_elements(By.CSS_SELECTOR, "a[href*='/s/']")
+            chapter_texts = []
+            for link in chapter_links:
+                text = link.text.strip()
+                if text.lower().startswith("chapter"):
+                    chapter_texts.append(text)
             
-            for selector in selectors:
-                try:
-                    chapter_links = driver.find_elements(By.CSS_SELECTOR, selector)
-                    print(f"[DEBUG] Selector '{selector}' found {len(chapter_links)} links")
-                    
-                    for link in chapter_links:
-                        href = link.get_attribute("href")
-                        if href:
-                            # Extract chapter number from URL
-                            parts = href.rstrip("/").split("/")
-                            if parts:
-                                last_part = parts[-1]
-                                if last_part.isdigit():
-                                    chapter_num = int(last_part)
-                                    max_chapter = max(max_chapter, chapter_num)
-                except Exception:
-                    continue
+            if chapter_texts:
+                # Extract the highest chapter number from link texts
+                max_chapter = 0
+                for text in chapter_texts:
+                    match = re.search(r'Chapter\s+(\d+)', text, re.IGNORECASE)
+                    if match:
+                        num = int(match.group(1))
+                        max_chapter = max(max_chapter, num)
                 
                 if max_chapter > 0:
-                    break
+                    print(f"[INFO] Found {max_chapter} chapters from link texts")
+                    return max_chapter
             
-            if max_chapter == 0:
-                # Try getting text-based chapter count
-                page_text = driver.page_source
-                import re
-                # Look for patterns like "Chapter 2345" or "2345 Chapters"
-                matches = re.findall(r'(?:Chapter\s+)?(\d{3,})', page_text)
-                if matches:
-                    max_chapter = max(int(m) for m in matches)
+            # Strategy 4: Count all chapter list items
+            list_items = driver.find_elements(By.CSS_SELECTOR, "li a, .chapter-list a, .chapters a")
+            if len(list_items) > 10:  # Reasonable minimum
+                total = len(list_items)
+                print(f"[INFO] Found {total} chapters from list item count")
+                return total
             
-            if max_chapter == 0:
-                raise ValueError("No chapters found on the TOC page")
-            
-            print(f"[INFO] Found {max_chapter} total chapters")
-            return max_chapter
+            raise ValueError("Could not detect chapter count from page")
             
         except Exception as e:
             print(f"[ERROR] Could not detect chapter count: {e}")

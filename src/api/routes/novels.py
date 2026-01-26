@@ -1,4 +1,4 @@
-"""
+"""  # pyright: ignore[reportImportCycles]
 Novels API routes
 """
 
@@ -194,8 +194,9 @@ async def update_novel(slug: str):
         raise HTTPException(status_code=400, detail="No existing chapters found")
     
     # Detect total chapters from website
-    novel_name = novel['title'].replace(' ', '-')
-    toc_url = f"https://novelhi.com/s/{novel_name}"
+    # Use folder name which matches the original URL format
+    folder_name = data_path.name  # This is the cleaned novel name from scraping
+    toc_url = f"https://novelhi.com/s/{folder_name}"
     
     try:
         scraper = NovelScraper(headless=True)
