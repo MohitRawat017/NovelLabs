@@ -1,12 +1,15 @@
 import os
 import re
 import time
+import logging
 from typing import Tuple, List
 
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+logger = logging.getLogger(__name__)
 
 
 class NovelScraper:
@@ -95,7 +98,7 @@ class NovelScraper:
             content_match = re.search(r'Content\s*\((\d+)\)', page_source)
             if content_match:
                 total = int(content_match.group(1))
-                print(f"[INFO] Found {total} chapters from Content header")
+                logger.info(f"Found {total} chapters from Content header")
                 return total
             
             # Strategy 2: Look for chapter count in meta or title
@@ -108,43 +111,92 @@ class NovelScraper:
                 match = re.search(pattern, page_source, re.IGNORECASE)
                 if match:
                     total = int(match.group(1))
-                    if 10 <= total <= 10000:  # Reasonable chapter count range
-                        print(f"[INFO] Found {total} chapters from pattern match")
-                        return total
+                    logger.info(f"Found {total} chapters from pattern: '{pattern}'")
+                    return total
             
-            # Strategy 3: Count chapter links on the page
-            chapter_links = driver.find_elements(By.CSS_SELECTOR, "a[href*='/s/']")
-            chapter_texts = []
-            for link in chapter_links:
-                text = link.text.strip()
-                if text.lower().startswith("chapter"):
-                    chapter_texts.append(text)
-            
-            if chapter_texts:
-                # Extract the highest chapter number from link texts
-                max_chapter = 0
-                for text in chapter_texts:
-                    match = re.search(r'Chapter\s+(\d+)', text, re.IGNORECASE)
+            # Strategy 3: Count chapter links (if available)
+            chapter_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/s/') and contains(@href, '/chapter-')]")
+            if chapter_links:
+                # Extract chapter numbers and find the maximum
+                chapter_numbers = []
+                for link in chapter_links:
+                    match = re.search(r'chapter-(\d+)', link.get_attribute('href'))
                     if match:
-                        num = int(match.group(1))
-                        max_chapter = max(max_chapter, num)
+                        chapter_numbers.append(int(match.group(1)))
                 
-                if max_chapter > 0:
-                    print(f"[INFO] Found {max_chapter} chapters from link texts")
-                    return max_chapter
-            
-            # Strategy 4: Count all chapter list items
-            list_items = driver.find_elements(By.CSS_SELECTOR, "li a, .chapter-list a, .chapters a")
-            if len(list_items) > 10:  # Reasonable minimum
-                total = len(list_items)
-                print(f"[INFO] Found {total} chapters from list item count")
-                return total
-            
-            raise ValueError("Could not detect chapter count from page")
+                if chapter_numbers:
+                    total = max(chapter_numbers)
+                    logger.info(f"Found {total} chapters by counting links")
+                    return total
             
         except Exception as e:
-            print(f"[ERROR] Could not detect chapter count: {e}")
-            raise ValueError(f"Could not detect total chapters: {e}")
+            logger.error(f"Error while trying to determine total chapters: {e}")
+        
+        # Fallback to the original method if the above strategies fail or are not applicable
+        driver.get(toc_url)
+        time.sleep(3)  # Wait for page to load
+        
+        # Method 1: Look for "Content (XXXX)" pattern in h3 tags
+        try:
+            # Get all h3 elements
+            h3_elements = driver.find_elements(By.CSS_SELECTOR, "h3")
+            logger.debug(f"Found {len(h3_elements)} h3 elements")
+            
+            for h3 in h3_elements:
+                text = h3.text.strip()
+                logger.debug(f"H3 text: '{text}'")
+                # Look for pattern like "Content (2317)"
+                match = re.search(r'Content\s*\((\d+)\)', text, re.IGNORECASE)
+                if match:
+                    total = int(match.group(1))
+                    logger.info(f"Found {total} total chapters from Content header")
+                    return total
+        except Exception as e:
+            logger.debug(f"Method 1 failed: {e}")
+        
+        # Method 2: Search page source for "Content (XXX)" pattern
+        try:
+            page_source = driver.page_source
+            match = re.search(r'Content\s*\((\d+)\)', page_source, re.IGNORECASE)
+            if match:
+                total = int(match.group(1))
+                logger.info(f"Found {total} total chapters from page source")
+                return total
+        except Exception as e:
+            logger.debug(f"Method 2 failed: {e}")
+        
+        # Method 3: Count chapter links in the page
+        try:
+            # Look for links with "Chapter X" text
+            chapter_links = driver.find_elements(By.XPATH, "//a[contains(text(), 'Chapter')]")
+            if chapter_links:
+                # Extract chapter numbers and find the maximum
+                chapter_numbers = []
+                for link in chapter_links:
+                    match = re.search(r'Chapter\s+(\d+)', link.text)
+                    if match:
+                        chapter_numbers.append(int(match.group(1)))
+                
+                if chapter_numbers:
+                    total = max(chapter_numbers)
+                    logger.info(f"Found {total} total chapters by counting links")
+                    return total
+        except Exception as e:
+            logger.debug(f"Method 3 failed: {e}")
+        
+        # Method 4: Fallback - use regex on page source to find highest chapter number
+        try:
+            page_source = driver.page_source
+            matches = re.findall(r'Chapter\s+(\d+)', page_source, re.IGNORECASE)
+            if matches:
+                numbers = [int(m) for m in matches]
+                total = max(numbers)
+                logger.info(f"Found {total} total chapters from regex fallback")
+                return total
+        except Exception as e:
+            logger.error(f"All methods failed to detect total chapters: {e}")
+        
+        raise ValueError("Could not determine total chapter count from TOC page")
 
     def scrape_chapter(self, driver: uc.Chrome, url: str) -> Tuple[str, str]:
         driver.get(url)
