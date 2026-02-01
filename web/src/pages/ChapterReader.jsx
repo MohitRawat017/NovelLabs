@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Settings, Home, Loader } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Settings, Home, Loader, Headphones } from 'lucide-react';
 import { getChapterContent } from '../services/api';
+import SettingsModal, { getSettings } from '../components/ui/SettingsModal';
+import AudioPlayer from '../components/ui/AudioPlayer';
 import './ChapterReader.css';
 
 function ChapterReader() {
@@ -10,6 +12,9 @@ function ChapterReader() {
     const [chapter, setChapter] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [showSettings, setShowSettings] = useState(false);
+    const [showAudio, setShowAudio] = useState(false);
+    const [settings, setSettings] = useState(getSettings);
 
     const chapterNum = parseInt(chapterId);
 
@@ -91,7 +96,12 @@ function ChapterReader() {
                     )}
                 </div>
 
-                <button className="btn btn-ghost">
+                <button className="btn btn-ghost" onClick={() => setShowAudio(true)}>
+                    <Headphones size={18} />
+                    Listen
+                </button>
+
+                <button className="btn btn-ghost" onClick={() => setShowSettings(true)}>
                     <Settings size={18} />
                     Settings
                 </button>
@@ -99,7 +109,13 @@ function ChapterReader() {
 
             <main className="reader-content">
                 <h1 className="chapter-title">{chapter.title}</h1>
-                <article className="chapter-text">
+                <article
+                    className="chapter-text"
+                    style={{
+                        fontSize: `${settings.fontSize}px`,
+                        fontFamily: settings.fontFamily
+                    }}
+                >
                     {chapter.content.split('\n\n').map((paragraph, idx) => (
                         paragraph.trim() && <p key={idx}>{paragraph}</p>
                     ))}
@@ -128,6 +144,22 @@ function ChapterReader() {
                     )}
                 </div>
             </footer>
+
+            <SettingsModal
+                isOpen={showSettings}
+                onClose={() => setShowSettings(false)}
+                onSettingsChange={setSettings}
+            />
+
+            {showAudio && (
+                <AudioPlayer
+                    novelSlug={slug}
+                    chapterNumber={chapterNum}
+                    chapterTitle={chapter?.title}
+                    settings={settings}
+                    onClose={() => setShowAudio(false)}
+                />
+            )}
         </div>
     );
 }

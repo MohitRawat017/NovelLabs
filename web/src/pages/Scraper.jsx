@@ -71,6 +71,7 @@ function Scraper() {
         setJobId(null);
         setProgress(null);
         setError(null);
+        setIsLoading(false);
         setUrl('');
         setStartChapter(1);
         setEndChapter('');
