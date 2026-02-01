@@ -118,9 +118,9 @@ async def get_chapter(chapter_id: int):
         if not chapter:
             raise HTTPException(status_code=404, detail="Chapter not found")
         
-        # Read content from file
-        content = ""
-        if chapter['content_path'] and os.path.exists(chapter['content_path']):
+        # Read content from DB first, fallback to file
+        content = chapter.get('content') or ""
+        if not content and chapter['content_path'] and os.path.exists(chapter['content_path']):
             with open(chapter['content_path'], 'r', encoding='utf-8') as f:
                 content = f.read()
                 # Skip the title and separator lines
@@ -182,9 +182,9 @@ async def get_chapter_by_number(slug: str, chapter_number: int):
         if not chapter:
             raise HTTPException(status_code=404, detail="Chapter not found")
         
-        # Read content from file
-        content = ""
-        if chapter['content_path'] and os.path.exists(chapter['content_path']):
+        # Read content from DB first, fallback to file
+        content = chapter.get('content') or ""
+        if not content and chapter['content_path'] and os.path.exists(chapter['content_path']):
             with open(chapter['content_path'], 'r', encoding='utf-8') as f:
                 content = f.read()
                 lines = content.split('\n')
