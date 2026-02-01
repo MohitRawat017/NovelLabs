@@ -1,224 +1,116 @@
-# AudioBook Generator
+# NovelLabs AudioBook Generator
 
-A complete audiobook production pipeline that scrapes web novels, segments text intelligently, and generates high-quality audio using Kokoro TTS with GPU acceleration.
+> **Turn any web novel into an immersive audiobook experience.**  
+> A complete production pipeline featuring smart scraping, intelligent text segmentation, and high-quality GPU-accelerated TTS.
 
-## Features
+![Project Banner](docs/banner_placeholder.png)
 
-- **Web Scraping** - Automated chapter extraction with CloudFlare bypass
-- **Smart Segmentation** - Sentence-aware chunking optimized for TTS (250 char max)
-- **Multi-language TTS** - 53 voices across 9 languages via Kokoro TTS
-- **GPU Acceleration** - CUDA support for faster processing
-- **Batch Processing** - Handle single files, chapters, or entire novels
-- **Resume Support** - Skip already processed content
+## ✨ Key Features
 
-## Quick Start
+### 🎤 Karaoke-Style Reading
+Experience novels like never before. As the audio plays, the current text chunk is **highlighted in real-time** and the page **auto-scrolls** to follow the narration.
+* *Audio & text perfectly synced using generated timing data.*
+
+### 🧠 Smart Background Scraping
+Don't let missing chapters stop you. The system automatically detects missing content and launches **concurrent scraping jobs** in the background, managed via a floating status panel.
+* *CloudFlare bypass included.*
+
+### 🎧 High-Quality Neural TTS
+Powered by **Kokoro TTS**, producing human-like narration with emotional range.
+* **10+ Voices**: British, American
+* **GPU Accelerated**: Blazing fast generation on NVIDIA cards.
+
+### 📚 Personal Library
+Manage your collection with a beautiful, dark-themed UI. Track your reading progress, resume where you left off, and customize fonts and themes.
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+graph TD
+    A[Web Scraper] -->|Raw HTML| B(Text Segmenter)
+    B -->|Cleaned JSON| C{Audio Engine}
+    C -->|WAV Audio| D[File System]
+    C -->|Timing JSON| D
+    D -->|Serve Static| E[FastAPI Backend]
+    E <-->|JSON API| F[React Frontend]
+    
+    subgraph Frontend Logic
+    F --> G[AudioPlayer]
+    G -->|Time Updates| H[ChapterReader]
+    H -->|Auto-Scroll| I(Karaoke UI)
+    end
+```
+
+## 🚀 Quick Start
 
 ### Prerequisites
+- Python 3.10+
+- Node.js 18+
+- NVIDIA GPU (Recommended for speed)
 
-- Python 3.8+
-- NVIDIA GPU with CUDA (optional, CPU supported)
-- Chrome browser
-
-### Installation
-
-1. Clone and setup environment:
+### 1. Backend Setup
 ```bash
-git clone <repository-url>
-cd audioBook
+# Clone the repo
+git clone https://github.com/yourusername/NovelLabs.git
+cd NovelLabs
+
+# Setup Python Environment
 python -m venv .venv
-.venv\Scripts\activate  # Windows
-```
+.venv\Scripts\activate
 
-2. Install PyTorch with CUDA:
-```bash
-# CUDA 12.1
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# CUDA 11.8
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# CPU only
-pip install torch torchvision torchaudio
-```
-
-3. Install dependencies:
-```bash
+# Install Dependencies
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
+
+# Start Server
+python -m uvicorn src.api.main:app --reload --port 8001
 ```
 
-## Project Structure
+### 2. Frontend Setup
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Visit **http://localhost:5173** to start reading!
+
+---
+
+## 🗺️ Project Roadmap
+
+We are actively expanding NovelLabs. Here is what's coming next:
+
+- [ ] **Database Integration**: Migrate to SQLite/PostgreSQL for robust data handling.
+- [ ] **Personalized Libraries**: View and follow other users' reading lists and libraries.
+- [ ] **Advanced TTS**: Integrate **Qwen3-TTS** for next-gen voice quality.
+- [ ] **Character Voice Mapping**: Auto-detect dialogue speakers and assign distinct voices.
+- [ ] **Multi-Source Scraping**: Plugins for RoyalRoad, WebNovel, and ScribbleHub.
+- [ ] **UI/UX Polish**: Enhanced animations and mobile-responsive layout.
+
+---
+
+
+## 📂 Project Structure
 
 ```
-audioBook/
+NovelLabs/
+├── audio/              # Generated WAVs & Timing JSONs
+├── data/               # Scraped Novel Text
 ├── src/
-│   ├── main.py         # TTS generator (entry point)
-│   ├── scraper.py      # Web scraper
-│   ├── segmenter.py    # Text segmentation
-│   └── config.py       # Configuration
-├── data/output/        # Scraped chapters
-├── Segmentor/output/   # Segmented JSON files
-├── audio/              # Generated audiobooks
-└── docs/               # Documentation
+│   ├── api/            # FastAPI Routes & Logic
+│   ├── scraper.py      # Selenium/BS4 Scraper
+│   └── segmenter.py    # NLP Text Chunking
+└── web/                # React Frontend (Vite)
+    ├── src/
+    │   ├── components/ # UI Components (AudioPlayer, etc.)
+    │   └── pages/      # Views (Library, ChapterReader)
 ```
 
-## Installation
+## 🤝 Contributing
+Contributions are welcome! Please open an issue or PR for any features in the roadmap.
 
-### Prerequisites
-
-- Python 3.8 or higher
-- Chrome browser installed
-- Git (optional)
-
-### Setup
-
-1. Clone or download this repository:
-```bash
-git clone <repository-url>
-cd audioBook
-```
-
-2. Create a virtual environment:
-```bash
-python -m venv venv
-```
-
-3. Activate the virtual environment:
-```bash
-# Windows
-venv\Scripts\activate
-
-# Linux/Mac
-source venv/bin/activate
-```
-
-4. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-### Usage
-
-**1. Scrape Novel Chapters**
-```bash
-python src/scraper.py
-```
-Enter TOC URL and chapter range when prompted.
-
-**2. Segment Text**
-```bash
-python src/segmenter.py
-```
-Processes scraped chapters into TTS-optimized chunks.
-
-**3. Generate Audio**
-```bash
-python src/main.py
-```
-Select processing mode and voice, then generate audiobooks.
-
-## Audio Generation Modes
-
-1. **Single File** - Process one JSON segment
-2. **Full Novel** - Process all chapters in a folder
-3. **Batch** - Process all novels in Segmentor/output
-4. **Range** - Process specific chapter range (e.g., 100-200)
-
-## Available Voices
-
-- 🇺🇸 American English (19 voices)
-- 🇬🇧 British English (8 voices)
-- 🇫🇷 French (1 voice)
-- 🇮🇹 Italian (2 voices)
-- 🇯🇵 Japanese (5 voices)
-- 🇨🇳 Mandarin (8 voices)
-- 🇪🇸 Spanish (3 voices)
-- 🇮🇳 Hindi (4 voices)
-- 🇧🇷 Portuguese (3 voices)
-
-## Configuration
-
-Edit `src/config.py` to customize:
-- Output directories
-- Browser settings
-- Scraper parameters
-- Timeout values
-- Delay between requests
-
-## Output Format
-
-Generated audio files are saved as:
-```
-audio/
-└── NovelName/
-    ├── Chapter_0001.wav
-    ├── Chapter_0002.wav
-    └── Chapter_0003.wav
-```
-
-Each chapter is a single combined audio file with automatic silence between text segments.
-
-## Performance
-
-- **CPU**: ~2-3 seconds per chunk
-- **GPU**: ~0.5-1 second per chunk
-- **Chapter**: 5-15 minutes (depends on length)
-
-## Troubleshooting
-
-**GPU not detected:**
-```bash
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
-**Chrome driver issues:**
-```bash
-pip install undetected-chromedriver --upgrade
-```
-
-**Scraping blocked:**
-- Increase delays in `config.py`
-- Use non-headless mode
-- Check website terms of service
-
-## Development
-
-### Running Tests
-```bash
-pytest tests/
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines.
-
-## License
-
-MIT License - See LICENSE file for details.
-
-## Disclaimer
-
-This tool is for personal use only. Users are responsible for complying with website terms of service and copyright laws.
-
-## Future Goals
-
-This project is actively being developed with ambitious expansion plans:
-
-### Audio Models & TTS Enhancement
-- **Coqui TTS Support**: Integrate open-source Coqui TTS as a lighter alternative to Kokoro
-- **Custom Voice Fine-tuning**: Implement transfer learning to create custom voices from small audio samples
-- **Real-time Streaming TTS**: Enable chunk-by-chunk audio streaming for faster user feedback
-
-### Performance & Optimization
-- **Multi-GPU Support**: Scale processing across multiple GPUs for batch operations
-- **Quantization**: Implement model quantization for deployment on edge devices
-- **Caching & CDN Integration**: Cache generated audio and serve via CDN for faster distribution
-- **Batch Optimization**: Adaptive batching based on available VRAM
-
-### Features & Functionality
-- **Web UI Dashboard**: Build a full-featured web interface for easy audio generation
-- **Audio Post-processing**: Add audio enhancement, compression, and normalization
-- **Chapter Bookmarking**: Implement bookmarks and progress tracking
-- **Audiobook Metadata**: Support for cover art, chapter metadata, and publishing info
-- **Format Support**: Add support for MP3, FLAC, and other audio formats
-- **Playlist Generation**: Create m3u playlists for seamless chapter playback
+## 📄 License
+MIT License.

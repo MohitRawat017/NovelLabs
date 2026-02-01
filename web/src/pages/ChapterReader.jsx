@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, Settings, Home, Loader, Headphones } from 'lucide-react';
 import { getChapterContent } from '../services/api';
 import SettingsModal, { getSettings } from '../components/ui/SettingsModal';
 import AudioPlayer from '../components/ui/AudioPlayer';
 import './ChapterReader.css';
+
+const API_URL = 'http://localhost:8001';
 
 function ChapterReader() {
     const { slug, chapterId } = useParams();
@@ -15,6 +17,12 @@ function ChapterReader() {
     const [showSettings, setShowSettings] = useState(false);
     const [showAudio, setShowAudio] = useState(false);
     const [settings, setSettings] = useState(getSettings);
+
+    // Karaoke highlighting state
+    const [chunkTimings, setChunkTimings] = useState(null);
+    const [activeChunkIndex, setActiveChunkIndex] = useState(-1);
+    const chunkRefs = useRef([]);
+    const contentRef = useRef(null);
 
     const chapterNum = parseInt(chapterId);
 
@@ -28,7 +36,6 @@ function ChapterReader() {
             const data = await getChapterContent(slug, chapterNum);
             setChapter(data);
             setError(null);
-            // Scroll to top when chapter changes
             window.scrollTo(0, 0);
         } catch (err) {
             setError(err.message);
@@ -37,7 +44,64 @@ function ChapterReader() {
         }
     };
 
+    const fetchChunkTimings = async () => {
+        try {
+            console.log('Fetching timings for:', slug, chapterNum);
+            const res = await fetch(`${API_URL}/api/audio/timings/${slug}/${chapterNum}`);
+            if (res.ok) {
+                const data = await res.json();
+                console.log('Timings loaded:', data);
+                setChunkTimings(data);
+                // Initialize chunk refs array
+                chunkRefs.current = new Array(data.chunks?.length || 0);
+            } else {
+                console.log('Timings not available, status:', res.status);
+            }
+        } catch (err) {
+            console.log('Timings fetch error:', err);
+        }
+    };
+
+    // Handle time updates from AudioPlayer with debouncing for smoother scrolling
+    const handleTimeUpdate = useCallback((currentTime, playbackRate) => {
+        if (!chunkTimings || !chunkTimings.chunks) return;
+
+        const chunks = chunkTimings.chunks;
+        let newActiveIndex = -1;
+
+        // Find the currently active chunk based on time
+        for (let i = 0; i < chunks.length; i++) {
+            if (currentTime >= chunks[i].start && currentTime < chunks[i].end) {
+                newActiveIndex = i;
+                break;
+            }
+        }
+
+        // Only update if the active chunk has changed
+        if (newActiveIndex !== activeChunkIndex && newActiveIndex >= 0) {
+            setActiveChunkIndex(newActiveIndex);
+
+            // Auto-scroll to the active chunk with smooth behavior
+            if (chunkRefs.current[newActiveIndex]) {
+                const element = chunkRefs.current[newActiveIndex];
+                const rect = element.getBoundingClientRect();
+                const isVisible = rect.top >= 0 && rect.bottom <= window.innerHeight;
+
+                // Only scroll if the element is not fully visible
+                if (!isVisible) {
+                    element.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'center',
+                        inline: 'nearest'
+                    });
+                }
+            }
+        }
+    }, [chunkTimings, activeChunkIndex]);
+
     const goToChapter = (num) => {
+        setActiveChunkIndex(-1);
+        setChunkTimings(null);
         navigate(`/novel/${slug}/chapter/${num}`);
     };
 
@@ -65,6 +129,32 @@ function ChapterReader() {
     }
 
     if (!chapter) return null;
+
+    // Render chapter content with karaoke highlighting when audio is playing
+    const renderChapterContent = () => {
+        // If we have chunk timings and audio is active, show chunked content
+        if (chunkTimings && chunkTimings.chunks && showAudio) {
+            console.log('Rendering with chunks, active index:', activeChunkIndex);
+            return (
+                <>
+                    {chunkTimings.chunks.map((chunk, idx) => (
+                        <p
+                            key={idx}
+                            ref={el => chunkRefs.current[idx] = el}
+                            className={`chunk ${idx === activeChunkIndex ? 'chunk-active' : ''}`}
+                        >
+                            {chunk.text}
+                        </p>
+                    ))}
+                </>
+            );
+        }
+
+        // Default: show regular paragraphs
+        return chapter.content.split('\n\n').map((paragraph, idx) => (
+            paragraph.trim() && <p key={idx}>{paragraph}</p>
+        ));
+    };
 
     return (
         <div className="reader">
@@ -96,9 +186,12 @@ function ChapterReader() {
                     )}
                 </div>
 
-                <button className="btn btn-ghost" onClick={() => setShowAudio(true)}>
+                <button 
+                    className="btn btn-ghost" 
+                    onClick={() => setShowAudio(!showAudio)}
+                >
                     <Headphones size={18} />
-                    Listen
+                    {showAudio ? 'Close' : 'Listen'}
                 </button>
 
                 <button className="btn btn-ghost" onClick={() => setShowSettings(true)}>
@@ -107,7 +200,7 @@ function ChapterReader() {
                 </button>
             </header>
 
-            <main className="reader-content">
+            <main className="reader-content" ref={contentRef}>
                 <h1 className="chapter-title">{chapter.title}</h1>
                 <article
                     className="chapter-text"
@@ -116,9 +209,7 @@ function ChapterReader() {
                         fontFamily: settings.fontFamily
                     }}
                 >
-                    {chapter.content.split('\n\n').map((paragraph, idx) => (
-                        paragraph.trim() && <p key={idx}>{paragraph}</p>
-                    ))}
+                    {renderChapterContent()}
                 </article>
             </main>
 
@@ -157,7 +248,13 @@ function ChapterReader() {
                     chapterNumber={chapterNum}
                     chapterTitle={chapter?.title}
                     settings={settings}
-                    onClose={() => setShowAudio(false)}
+                    onClose={() => {
+                        setShowAudio(false);
+                        setActiveChunkIndex(-1);
+                        setChunkTimings(null);
+                    }}
+                    onTimeUpdate={handleTimeUpdate}
+                    onAudioReady={fetchChunkTimings}
                 />
             )}
         </div>

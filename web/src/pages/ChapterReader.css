@@ -30,7 +30,6 @@
     from {
         transform: rotate(0deg);
     }
-
     to {
         transform: rotate(360deg);
     }
@@ -110,12 +109,82 @@
     .reader-header {
         padding: var(--space-sm) var(--space-md);
     }
-
     .reader-content {
         padding: var(--space-xl) var(--space-md);
     }
-
     .chapter-text {
         font-size: 1rem;
     }
+}
+
+/* Karaoke-style chunk highlighting */
+.chunk {
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    padding: 0.5rem 1rem;
+    margin: 0.75rem -1rem;
+    border-radius: 8px;
+    border-left: 4px solid transparent;
+    position: relative;
+    text-indent: 0 !important;
+    scroll-margin-top: 150px; /* Offset for fixed header */
+}
+
+.chunk-active {
+    background: linear-gradient(90deg,
+            rgba(255, 200, 87, 0.25) 0%,
+            rgba(255, 200, 87, 0.15) 50%,
+            rgba(255, 200, 87, 0.05) 100%);
+    border-left-color: #FFC857;
+    box-shadow: 
+        0 0 40px rgba(255, 200, 87, 0.2),
+        0 4px 20px rgba(255, 200, 87, 0.1);
+    transform: translateX(4px);
+    color: var(--text-primary);
+}
+
+/* Pulse animation for active chunk */
+@keyframes pulse-highlight {
+    0% {
+        box-shadow: 
+            0 0 40px rgba(255, 200, 87, 0.2),
+            0 4px 20px rgba(255, 200, 87, 0.1);
+    }
+    50% {
+        box-shadow: 
+            0 0 50px rgba(255, 200, 87, 0.3),
+            0 6px 25px rgba(255, 200, 87, 0.15);
+    }
+    100% {
+        box-shadow: 
+            0 0 40px rgba(255, 200, 87, 0.2),
+            0 4px 20px rgba(255, 200, 87, 0.1);
+    }
+}
+
+.chunk-active {
+    animation: pulse-highlight 2s ease-in-out infinite;
+}
+
+/* Optional: Add a subtle indicator before active chunk */
+.chunk-active::before {
+    content: '';
+    position: absolute;
+    left: -4px;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: linear-gradient(180deg, 
+        #FFC857 0%, 
+        rgba(255, 200, 87, 0.5) 100%);
+    border-radius: 4px;
+}
+
+/* Smooth scroll behavior for the entire page */
+html {
+    scroll-behavior: smooth;
+}
+
+/* Override scroll behavior when audio is playing */
+.reader.audio-active {
+    scroll-behavior: smooth;
 }

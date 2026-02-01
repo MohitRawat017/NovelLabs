@@ -4,7 +4,7 @@ import './AudioPlayer.css';
 
 const API_URL = 'http://localhost:8001';
 
-function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose }) {
+function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
     const audioRef = useRef(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
@@ -24,6 +24,14 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         checkAndGenerateAudio();
     }, [novelSlug, chapterNumber]);
 
+    // Update playback speed when settings change
+    useEffect(() => {
+        if (audioRef.current && settings?.ttsSpeed) {
+            setSpeed(settings.ttsSpeed);
+            audioRef.current.playbackRate = settings.ttsSpeed;
+        }
+    }, [settings?.ttsSpeed]);
+
     const checkAndGenerateAudio = async () => {
         setIsLoading(true);
         setError(null);
@@ -37,9 +45,15 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
 
             if (status.exists) {
                 // Audio ready - load it
-                setAudioUrl(`${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}`);
+                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
+                // Notify parent that audio is ready (for fetching timings)
+                if (onAudioReady) {
+                    // Add a small delay to ensure audio is loaded before fetching timings
+                    setTimeout(() => onAudioReady(), 500);
+                }
             } else if (status.generating) {
                 // Already generating - poll for completion
                 setGenerationStatus('Generating audio...');
@@ -50,6 +64,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                 await generateAudio();
             }
         } catch (err) {
+            console.error('Audio check error:', err);
             setError('Failed to check audio status');
             setIsLoading(false);
         }
@@ -65,9 +80,13 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             const data = await res.json();
 
             if (data.status === 'exists') {
-                setAudioUrl(`${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}`);
+                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
+                if (onAudioReady) {
+                    setTimeout(() => onAudioReady(), 500);
+                }
             } else if (data.status === 'queued' || data.status === 'already_generating') {
                 setGenerationStatus('Generating audio with Kokoro TTS...');
                 pollForCompletion();
@@ -76,6 +95,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                 setIsLoading(false);
             }
         } catch (err) {
+            console.error('Audio generation error:', err);
             setError('Failed to start audio generation');
             setIsLoading(false);
         }
@@ -91,10 +111,15 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
 
                 if (status.exists) {
                     clearInterval(interval);
-                    setAudioUrl(`${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}`);
+                    const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                    setAudioUrl(url);
                     setAudioReady(true);
                     setIsLoading(false);
                     setGenerationStatus(null);
+                    // Notify parent that audio is ready
+                    if (onAudioReady) {
+                        setTimeout(() => onAudioReady(), 500);
+                    }
                 } else if (status.error) {
                     clearInterval(interval);
                     setError(status.error);
@@ -117,12 +142,21 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         if (!audio) return;
 
         const handleTimeUpdate = () => {
-            setCurrentTime(audio.currentTime);
-            setProgress((audio.currentTime / audio.duration) * 100);
+            const time = audio.currentTime;
+            const dur = audio.duration;
+            
+            setCurrentTime(time);
+            setProgress((time / dur) * 100);
+            
+            // Report time to parent for karaoke highlighting
+            if (onTimeUpdate && dur && !isNaN(time)) {
+                onTimeUpdate(time, audio.playbackRate);
+            }
         };
 
         const handleLoadedMetadata = () => {
             setDuration(audio.duration);
+            console.log('Audio loaded, duration:', audio.duration);
         };
 
         const handleEnded = () => {
@@ -130,16 +164,22 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             setProgress(0);
         };
 
+        const handleCanPlay = () => {
+            console.log('Audio can play');
+        };
+
         audio.addEventListener('timeupdate', handleTimeUpdate);
         audio.addEventListener('loadedmetadata', handleLoadedMetadata);
         audio.addEventListener('ended', handleEnded);
+        audio.addEventListener('canplay', handleCanPlay);
 
         return () => {
             audio.removeEventListener('timeupdate', handleTimeUpdate);
             audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
             audio.removeEventListener('ended', handleEnded);
+            audio.removeEventListener('canplay', handleCanPlay);
         };
-    }, [audioUrl]);
+    }, [audioUrl, onTimeUpdate]);
 
     const togglePlay = () => {
         if (!audioRef.current) return;
@@ -147,7 +187,10 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         if (isPlaying) {
             audioRef.current.pause();
         } else {
-            audioRef.current.play();
+            audioRef.current.play().catch(err => {
+                console.error('Play error:', err);
+                setError('Failed to play audio');
+            });
         }
         setIsPlaying(!isPlaying);
     };
@@ -169,6 +212,9 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         setSpeed(nextSpeed);
         if (audioRef.current) {
             audioRef.current.playbackRate = nextSpeed;
+        }
+        if (onSpeedChange) {
+            onSpeedChange(nextSpeed);
         }
     };
 
@@ -207,7 +253,12 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     return (
         <div className="audio-player">
             {audioUrl && (
-                <audio ref={audioRef} src={audioUrl} preload="auto" />
+                <audio 
+                    ref={audioRef} 
+                    src={audioUrl} 
+                    preload="auto"
+                    crossOrigin="anonymous"
+                />
             )}
 
             <div className="audio-player-header">
