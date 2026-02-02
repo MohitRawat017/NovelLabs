@@ -69,7 +69,7 @@ def sync_chapters_for_novel(novel_id: int, data_path: str):
 @router.get("/novel/{slug}", response_model=ChapterListResponse)
 async def list_chapters(
     slug: str,
-    sort: str = Query("asc", regex="^(asc|desc)$"),
+    sort: str = Query("asc", pattern="^(asc|desc)$"),
     search: Optional[str] = Query(None)
 ):
     """Get all chapters for a novel"""
