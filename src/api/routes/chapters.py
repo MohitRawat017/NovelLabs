@@ -66,6 +66,65 @@ def sync_chapters_for_novel(novel_id: int, data_path: str):
     return len(chapter_files)
 
 
+from pydantic import BaseModel
+
+class ChapterCreate(BaseModel):
+    """Schema for creating a chapter"""
+    novel_slug: str
+    chapter_number: int
+    title: str = "Untitled Chapter"
+    content: str
+    word_count: int = 0
+
+
+@router.post("")
+async def create_chapter(chapter: ChapterCreate):
+    """Create a chapter (for migration/seeding) - stores content in DB"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Get novel ID from slug
+        cursor.execute('SELECT id FROM novels WHERE slug = ?', (chapter.novel_slug,))
+        novel = cursor.fetchone()
+        
+        if not novel:
+            raise HTTPException(status_code=404, detail="Novel not found")
+        
+        novel_id = novel['id'] if hasattr(novel, '__getitem__') else novel[0]
+        
+        # Check if chapter already exists
+        cursor.execute(
+            'SELECT id FROM chapters WHERE novel_id = ? AND chapter_number = ?',
+            (novel_id, chapter.chapter_number)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            raise HTTPException(status_code=409, detail="Chapter already exists")
+        
+        # Calculate word count if not provided
+        word_count = chapter.word_count or len(chapter.content.split())
+        
+        # Insert chapter with content stored directly in DB
+        cursor.execute('''
+            INSERT INTO chapters (novel_id, chapter_number, title, content, word_count)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (novel_id, chapter.chapter_number, chapter.title, chapter.content, word_count))
+        
+        conn.commit()
+        
+        # Update novel's chapter count
+        cursor.execute('''
+            UPDATE novels SET chapter_count = (
+                SELECT COUNT(*) FROM chapters WHERE novel_id = ?
+            ) WHERE id = ?
+        ''', (novel_id, novel_id))
+        
+        conn.commit()
+        
+        return {"message": "Chapter created", "chapter_number": chapter.chapter_number}
+
+
 @router.get("/novel/{slug}", response_model=ChapterListResponse)
 async def list_chapters(
     slug: str,

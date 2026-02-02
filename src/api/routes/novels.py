@@ -150,6 +150,34 @@ async def get_novel(slug: str):
     return novel
 
 
+@router.post("")
+async def create_novel(novel: NovelCreate):
+    """Create a new novel (for migration/seeding)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Check if novel already exists
+        cursor.execute('SELECT id FROM novels WHERE slug = ?', (novel.slug,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            raise HTTPException(status_code=409, detail="Novel already exists")
+        
+        cursor.execute('''
+            INSERT INTO novels (slug, title, description, cover_url, genres, chapter_count, data_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (novel.slug, novel.title, novel.description, novel.cover_url, 
+              novel.genres, 0, novel.data_path))
+        
+        conn.commit()
+        
+        # Get the created novel
+        cursor.execute('SELECT * FROM novels WHERE slug = ?', (novel.slug,))
+        created = dict_from_row(cursor.fetchone())
+    
+    return created
+
+
 @router.post("/sync")
 async def sync_novels():
     """Manually trigger syncing novels from filesystem to database"""
