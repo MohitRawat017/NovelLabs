@@ -1,5 +1,9 @@
 """
 Scraper API routes - triggers the Python web scraper
+
+NOTE: Web scraping dependencies (selenium, beautifulsoup4, undetected-chromedriver)
+are optional. If not installed, scraping endpoints will return 503 Service Unavailable.
+This allows the backend to deploy on Render without heavy scraping dependencies.
 """
 
 import asyncio
@@ -14,6 +18,24 @@ router = APIRouter()
 
 # Store for tracking scrape jobs
 scrape_jobs: Dict[str, dict] = {}
+
+# Check if scraping dependencies are available
+SCRAPER_AVAILABLE = False
+try:
+    import selenium
+    import bs4
+    SCRAPER_AVAILABLE = True
+except ImportError:
+    pass
+
+
+def check_scraper_available():
+    """Raise 503 if scraper dependencies are not installed."""
+    if not SCRAPER_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Scraping service unavailable. Dependencies (selenium, beautifulsoup4) not installed on this server."
+        )
 
 
 def run_scraper_with_detection(job_id: str, toc_url: str, start: int):
@@ -120,6 +142,8 @@ def run_scraper(job_id: str, toc_url: str, start: int, end: int):
 @router.post("/start")
 async def start_scraping(request: ScrapeRequest, background_tasks: BackgroundTasks):
     """Start a new scraping job"""
+    check_scraper_available()  # Returns 503 if deps not installed
+    
     import uuid
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
