@@ -3,6 +3,7 @@ NovelLabs FastAPI Backend
 Main application entry point
 """
 
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from .routes import novels, chapters, scraper, audio
 from .database import init_db
+from .config import ALLOWED_ORIGINS
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -18,10 +20,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration for React frontend
+# CORS configuration - use env var or defaults
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,10 +35,16 @@ app.include_router(chapters.router, prefix="/api/chapters", tags=["chapters"])
 app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
 app.include_router(audio.router, prefix="/api/audio", tags=["audio"])
 
-# Mount static files for covers and audio
+# Mount static files for covers and audio (only if directories exist)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-app.mount("/covers", StaticFiles(directory=str(BASE_DIR / "web" / "public" / "covers")), name="covers")
-app.mount("/audio", StaticFiles(directory=str(BASE_DIR / "audio")), name="audio")
+
+covers_dir = BASE_DIR / "web" / "public" / "covers"
+if covers_dir.exists():
+    app.mount("/covers", StaticFiles(directory=str(covers_dir)), name="covers")
+
+audio_dir = BASE_DIR / "audio"
+if audio_dir.exists():
+    app.mount("/audio", StaticFiles(directory=str(audio_dir)), name="audio")
 
 
 @app.on_event("startup")
