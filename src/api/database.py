@@ -43,14 +43,58 @@ def get_connection():
         return conn
 
 
+class PostgresCursorWrapper:
+    """Wrapper cursor that converts ? placeholders to %s for PostgreSQL"""
+    def __init__(self, cursor):
+        self._cursor = cursor
+    
+    def execute(self, query, params=()):
+        # Convert SQLite ? placeholders to PostgreSQL %s
+        query = query.replace('?', '%s')
+        return self._cursor.execute(query, params)
+    
+    def fetchone(self):
+        return self._cursor.fetchone()
+    
+    def fetchall(self):
+        return self._cursor.fetchall()
+    
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class PostgresConnectionWrapper:
+    """Wrapper connection that returns wrapped cursors"""
+    def __init__(self, conn):
+        self._conn = conn
+        self._cursor_factory = psycopg2.extras.RealDictCursor
+    
+    def cursor(self, *args, **kwargs):
+        if 'cursor_factory' not in kwargs:
+            kwargs['cursor_factory'] = self._cursor_factory
+        return PostgresCursorWrapper(self._conn.cursor(*args, **kwargs))
+    
+    def commit(self):
+        return self._conn.commit()
+    
+    def rollback(self):
+        return self._conn.rollback()
+    
+    def close(self):
+        return self._conn.close()
+    
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 @contextmanager
 def get_db():
     """Context manager for database connections"""
     conn = get_connection()
     try:
         if IS_POSTGRES:
-            # Use RealDictCursor for PostgreSQL to get dict-like rows
-            conn.cursor_factory = psycopg2.extras.RealDictCursor
+            # Wrap connection to auto-convert ? to %s
+            conn = PostgresConnectionWrapper(conn)
         yield conn
         conn.commit()
     except Exception as e:
