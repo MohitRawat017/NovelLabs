@@ -68,6 +68,15 @@ def _get_cursor(conn):
         return conn.cursor()
 
 
+def db_execute(cursor, query: str, params: tuple = ()):
+    """Execute a query with automatic placeholder conversion for PostgreSQL"""
+    if IS_POSTGRES:
+        # Convert SQLite ? placeholders to PostgreSQL %s
+        query = query.replace('?', '%s')
+    cursor.execute(query, params)
+    return cursor
+
+
 def init_db():
     """Initialize the database with required tables"""
     if not IS_POSTGRES:
