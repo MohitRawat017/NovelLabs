@@ -101,7 +101,7 @@ class NovelScraper:
             novel_name = parts[-2] if len(parts) >= 2 else novel_name
         return novel_name
 
-    def get_total_chapters(self, driver: uc.Chrome, toc_url: str) -> int:
+    def get_total_chapters(self, driver, toc_url: str) -> int:
         """Scrape the TOC page to find total chapter count"""
         novel_name = self.get_novel_name(toc_url)
         
@@ -231,7 +231,7 @@ class NovelScraper:
         
         raise ValueError("Could not determine total chapter count from TOC page")
 
-    def scrape_chapter(self, driver: uc.Chrome, url: str) -> Tuple[str, str]:
+    def scrape_chapter(self, driver, url: str) -> Tuple[str, str]:
         driver.get(url)
 
         try:
