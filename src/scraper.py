@@ -1,23 +1,56 @@
+"""
+Novel Scraper Module
+
+NOTE: This module requires selenium, beautifulsoup4, and undetected-chromedriver.
+If not installed, the module will still import but NovelScraper will raise an error on instantiation.
+"""
+
 import os
 import re
 import time
 import logging
 from typing import Tuple, List
 
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
 logger = logging.getLogger(__name__)
+
+# Optional dependencies - may not be installed on Render
+SCRAPER_AVAILABLE = False
+_uc = None
+_By = None
+_WebDriverWait = None
+_EC = None
+
+try:
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    _uc = uc
+    _By = By
+    _WebDriverWait = WebDriverWait
+    _EC = EC
+    SCRAPER_AVAILABLE = True
+except ImportError:
+    pass
+
+
+def _check_dependencies():
+    """Raise error if scraping dependencies are not installed."""
+    if not SCRAPER_AVAILABLE:
+        raise ImportError(
+            "Scraping dependencies not installed. "
+            "Install with: pip install selenium beautifulsoup4 undetected-chromedriver"
+        )
 
 
 class NovelScraper:
     def __init__(self, headless: bool = True):
+        _check_dependencies()  # Raises ImportError if deps not available
         self.headless = headless
 
-    def start_driver(self) -> uc.Chrome:
-        options = uc.ChromeOptions()
+    def start_driver(self):
+        """Start Chrome WebDriver. Returns undetected_chromedriver.Chrome instance."""
+        options = _uc.ChromeOptions()
         
         if self.headless:
             options.add_argument("--headless=new")
@@ -30,7 +63,7 @@ class NovelScraper:
 
         print("[INFO] Initializing Chrome WebDriver...")
         # Use version_main to match Chrome browser version (143)
-        return uc.Chrome(options=options, version_main=143)
+        return _uc.Chrome(options=options, version_main=143)
 
     def generate_chapter_urls(self, toc_url: str, start: int, end: int) -> Tuple[List[str], str]:
         # Handle multiple URL formats:
@@ -86,8 +119,8 @@ class NovelScraper:
         
         try:
             # Wait for page to load
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            _WebDriverWait(driver, 20).until(
+                _EC.presence_of_element_located((_By.TAG_NAME, "body"))
             )
             time.sleep(3)  # Extra wait for dynamic content
             
@@ -115,7 +148,7 @@ class NovelScraper:
                     return total
             
             # Strategy 3: Count chapter links (if available)
-            chapter_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/s/') and contains(@href, '/chapter-')]")
+            chapter_links = driver.find_elements(_By.XPATH, "//a[contains(@href, '/s/') and contains(@href, '/chapter-')]")
             if chapter_links:
                 # Extract chapter numbers and find the maximum
                 chapter_numbers = []
@@ -139,7 +172,7 @@ class NovelScraper:
         # Method 1: Look for "Content (XXXX)" pattern in h3 tags
         try:
             # Get all h3 elements
-            h3_elements = driver.find_elements(By.CSS_SELECTOR, "h3")
+            h3_elements = driver.find_elements(_By.CSS_SELECTOR, "h3")
             logger.debug(f"Found {len(h3_elements)} h3 elements")
             
             for h3 in h3_elements:
@@ -168,7 +201,7 @@ class NovelScraper:
         # Method 3: Count chapter links in the page
         try:
             # Look for links with "Chapter X" text
-            chapter_links = driver.find_elements(By.XPATH, "//a[contains(text(), 'Chapter')]")
+            chapter_links = driver.find_elements(_By.XPATH, "//a[contains(text(), 'Chapter')]")
             if chapter_links:
                 # Extract chapter numbers and find the maximum
                 chapter_numbers = []
@@ -202,8 +235,8 @@ class NovelScraper:
         driver.get(url)
 
         try:
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.ID, "showReading"))
+            _WebDriverWait(driver, 15).until(
+                _EC.presence_of_element_located((_By.ID, "showReading"))
             )
         except:
             raise ValueError("Content container not found - page may not have loaded")
@@ -213,15 +246,15 @@ class NovelScraper:
         title = "Untitled Chapter"
         for tag in ["h1", "h2"]:
             try:
-                title_elem = driver.find_element(By.TAG_NAME, tag)
+                title_elem = driver.find_element(_By.TAG_NAME, tag)
                 title = title_elem.text.strip()
                 break
             except:
                 continue
 
         try:
-            show_reading_div = driver.find_element(By.ID, "showReading")
-            paragraphs = show_reading_div.find_elements(By.TAG_NAME, "p")
+            show_reading_div = driver.find_element(_By.ID, "showReading")
+            paragraphs = show_reading_div.find_elements(_By.TAG_NAME, "p")
             
             if paragraphs:
                 content = "\n\n".join(p.text.strip() for p in paragraphs if p.text.strip())

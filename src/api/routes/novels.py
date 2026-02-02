@@ -164,6 +164,10 @@ async def update_novel(slug: str):
     import threading
     import uuid
     
+    # Check if scraper dependencies are available
+    from .scraper import check_scraper_available
+    check_scraper_available()  # Returns 503 if deps not installed
+    
     # Add scraper to path
     sys.path.insert(0, str(BASE_DIR / "src"))
     from scraper import NovelScraper
