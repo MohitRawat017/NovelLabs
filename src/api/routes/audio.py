@@ -1,32 +1,40 @@
 """
-Audio API routes - handles TTS generation and audio streaming using Kokoro TTS
-NOW WITH DATABASE INTEGRATION for segments table
+Audio API routes - handles TTS generation via external TTS service
+Segments are stored per-chunk with audio_url pointing to R2 CDN
+
+ARCHITECTURE:
+- Render backend (this file): Orchestration, chunking, DB storage
+- Lightning AI: Stateless TTS (text → audio → R2 → URL)
+- Cloudflare R2: Audio file storage
 """
 
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 import logging
 import json
+import httpx
 from datetime import datetime
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Base directories
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-AUDIO_DIR = BASE_DIR / "audio"
-SCRAPED_DIR = BASE_DIR / "data" / "output"
-
-# Ensure audio directory exists
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+# Import configuration
+from ..config import TTS_SERVICE_URL, TTS_TIMEOUT
 
 # Import database utilities
 from ..database import get_db
 
-# English voices only (from Kokoro_main.py)
+# Base directories (for backward compatibility during migration)
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+AUDIO_DIR = BASE_DIR / "audio"
+
+# Ensure audio directory exists (for legacy files)
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+# English voices (fetched from TTS service, cached here as fallback)
 ENGLISH_VOICES = {
     "American English (Female)": [
         "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
@@ -44,7 +52,8 @@ ENGLISH_VOICES = {
     ]
 }
 
-# TTS generation jobs tracker
+# TTS generation jobs tracker (in-memory, not durable)
+# TODO: Replace with Redis/Celery for durable background jobs in Phase 2
 tts_jobs: dict = {}
 
 
@@ -55,15 +64,110 @@ class TTSRequest(BaseModel):
     chapter_number: Optional[int] = None
 
 
+# ==================== Custom Exceptions ====================
+
+class TTSServiceError(Exception):
+    """Base exception for TTS service errors."""
+    pass
+
+
+class TTSUnavailableError(TTSServiceError):
+    """TTS service is not reachable."""
+    pass
+
+
+class TTSTimeoutError(TTSServiceError):
+    """TTS request timed out."""
+    pass
+
+
+# ==================== TTS Service Client ====================
+
+async def call_tts_service(text: str, voice: str, segment_id: str) -> dict:
+    """
+    Call Lightning AI TTS service to synthesize audio.
+    
+    Returns:
+        {
+            "audio_url": "https://r2.../seg_123.wav",
+            "duration": 3.2,
+            "sample_rate": 24000
+        }
+    
+    Raises:
+        HTTPException on 4xx errors (do not retry)
+        TTSUnavailableError on connection errors
+        TTSTimeoutError on timeout
+    """
+    url = f"{TTS_SERVICE_URL}/synthesize"
+    payload = {
+        "text": text,
+        "voice": voice,
+        "segment_id": segment_id
+    }
+    
+    # Retry logic: only retry on 5xx/network/timeout errors
+    # Do NOT retry on 4xx errors (invalid text/voice)
+    max_retries = 3
+    last_error = None
+    
+    async with httpx.AsyncClient() as client:
+        for attempt in range(max_retries):
+            try:
+                response = await client.post(
+                    url, 
+                    json=payload, 
+                    timeout=TTS_TIMEOUT
+                )
+                
+                # 4xx errors: do not retry, fail immediately
+                if 400 <= response.status_code < 500:
+                    error_detail = response.json().get("detail", "Invalid request")
+                    raise HTTPException(status_code=response.status_code, detail=error_detail)
+                
+                # 5xx errors: retry
+                if response.status_code >= 500:
+                    logger.warning(f"TTS service returned {response.status_code}, retry {attempt + 1}/{max_retries}")
+                    last_error = f"TTS service error: {response.status_code}"
+                    continue
+                
+                response.raise_for_status()
+                return response.json()
+                
+            except httpx.TimeoutException:
+                logger.warning(f"TTS request timed out, retry {attempt + 1}/{max_retries}")
+                last_error = "TTS request timed out"
+                if attempt == max_retries - 1:
+                    raise TTSTimeoutError(last_error)
+                    
+            except httpx.ConnectError:
+                logger.error(f"Cannot connect to TTS service at {TTS_SERVICE_URL}")
+                raise TTSUnavailableError(f"TTS service unavailable at {TTS_SERVICE_URL}")
+    
+    # All retries exhausted
+    raise TTSTimeoutError(last_error or "TTS service failed after retries")
+
+
+# ==================== Endpoints ====================
+
 @router.get("/voices")
 async def list_voices():
-    """List available English TTS voices"""
+    """List available English TTS voices."""
+    # Try to fetch from TTS service, fallback to cached list
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{TTS_SERVICE_URL}/voices", timeout=5)
+            if response.status_code == 200:
+                return response.json()
+    except Exception as e:
+        logger.warning(f"Could not fetch voices from TTS service: {e}")
+    
     return ENGLISH_VOICES
 
 
 @router.get("/voices/flat")
 async def list_voices_flat():
-    """List all voices as a flat array"""
+    """List all voices as a flat array."""
     all_voices = []
     for group, voices in ENGLISH_VOICES.items():
         for voice in voices:
@@ -73,25 +177,48 @@ async def list_voices_flat():
 
 @router.get("/stream/{novel_slug}/{chapter_number}")
 async def stream_chapter_audio(novel_slug: str, chapter_number: int):
-    """Stream audio file for a chapter"""
+    """
+    Stream/redirect to audio for a chapter.
+    
+    New behavior: Redirects to first segment's audio_url from R2.
+    Legacy: Returns local file if it exists.
+    """
+    # Check for segments with audio URLs in database
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT s.audio_url FROM segments s
+            JOIN chapters c ON s.chapter_id = c.id
+            JOIN novels n ON c.novel_id = n.id
+            WHERE n.slug = ? AND c.chapter_number = ? AND s.status = 'ready'
+            ORDER BY s.segment_index ASC
+            LIMIT 1
+        ''', (novel_slug, chapter_number))
+        
+        result = cursor.fetchone()
+        if result and result['audio_url']:
+            # Redirect to R2 CDN URL
+            return RedirectResponse(url=result['audio_url'])
+    
+    # Legacy fallback: check local filesystem
     audio_path = AUDIO_DIR / novel_slug / f"Chapter_{chapter_number:04d}.wav"
     
-    if not audio_path.exists():
-        raise HTTPException(
-            status_code=404, 
-            detail="Audio not generated yet. Use /generate to create audio first."
+    if audio_path.exists():
+        return FileResponse(
+            audio_path,
+            media_type="audio/wav",
+            filename=f"{novel_slug}_chapter_{chapter_number}.wav"
         )
     
-    return FileResponse(
-        audio_path,
-        media_type="audio/wav",
-        filename=f"{novel_slug}_chapter_{chapter_number}.wav"
+    raise HTTPException(
+        status_code=404, 
+        detail="Audio not generated yet. Use /generate to create audio first."
     )
 
 
 @router.get("/status/{novel_slug}/{chapter_number}")
 async def check_audio_status(novel_slug: str, chapter_number: int):
-    """Check if audio exists for a chapter - checks both DB and filesystem"""
+    """Check if audio exists for a chapter - checks both DB and filesystem."""
     with get_db() as conn:
         cursor = conn.cursor()
         
@@ -111,7 +238,8 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         # Check if segments exist and are ready
         cursor.execute('''
             SELECT COUNT(*) as total,
-                   SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) as ready_count
+                   SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) as ready_count,
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
             FROM segments
             WHERE chapter_id = ?
         ''', (chapter_id,))
@@ -119,10 +247,10 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         segment_stats = cursor.fetchone()
         has_segments = segment_stats['total'] > 0
         all_ready = segment_stats['total'] == segment_stats['ready_count'] if has_segments else False
+        has_failures = segment_stats['failed_count'] > 0 if has_segments else False
     
     # Check filesystem as fallback
     audio_path = AUDIO_DIR / novel_slug / f"Chapter_{chapter_number:04d}.wav"
-    timing_path = AUDIO_DIR / novel_slug / f"Chapter_{chapter_number:04d}_timing.json"
     
     job_key = f"{novel_slug}_{chapter_number}"
     job = tts_jobs.get(job_key, {})
@@ -131,8 +259,8 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         "exists": all_ready or audio_path.exists(),
         "segments_in_db": has_segments,
         "segments_ready": all_ready,
+        "segments_failed": has_failures,
         "audio_file_exists": audio_path.exists(),
-        "timing_file_exists": timing_path.exists(),
         "generating": job.get("status") == "generating",
         "progress": job.get("progress", 0),
         "error": job.get("error")
@@ -141,7 +269,7 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
 
 @router.get("/timings/{novel_slug}/{chapter_number}")
 async def get_chapter_timings(novel_slug: str, chapter_number: int):
-    """Get chunk timing data for karaoke-style highlighting - NOW FROM DATABASE"""
+    """Get chunk timing data for karaoke-style highlighting - from database."""
     
     with get_db() as conn:
         cursor = conn.cursor()
@@ -159,9 +287,9 @@ async def get_chapter_timings(novel_slug: str, chapter_number: int):
         
         chapter_id = result['id']
         
-        # Get segments with timing data
+        # Get segments with timing data and audio URLs
         cursor.execute('''
-            SELECT segment_index, text, timing_data, status
+            SELECT segment_index, text, timing_data, audio_url, status
             FROM segments
             WHERE chapter_id = ?
             ORDER BY segment_index ASC
@@ -170,22 +298,10 @@ async def get_chapter_timings(novel_slug: str, chapter_number: int):
         segments = cursor.fetchall()
         
         if not segments:
-            # Fallback to JSON file if DB not populated yet
-            logger.warning(f"No segments in DB for chapter {chapter_number}, falling back to JSON")
-            timing_path = AUDIO_DIR / novel_slug / f"Chapter_{chapter_number:04d}_timing.json"
-            
-            if not timing_path.exists():
-                raise HTTPException(
-                    status_code=404,
-                    detail="Timing data not found in DB or filesystem."
-                )
-            
-            try:
-                with open(timing_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Error reading timing file: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(
+                status_code=404,
+                detail="No segments found. Generate audio first."
+            )
         
         # Build response from DB segments
         chunks = []
@@ -199,7 +315,9 @@ async def get_chapter_timings(novel_slug: str, chapter_number: int):
                 "text": seg['text'],
                 "start": timing.get('start', 0.0),
                 "end": timing.get('end', 0.0),
-                "duration": timing.get('duration', 0.0)
+                "duration": timing.get('duration', 0.0),
+                "audio_url": seg['audio_url'],
+                "status": seg['status']
             }
             chunks.append(chunk_data)
             total_duration = max(total_duration, chunk_data['end'])
@@ -221,7 +339,7 @@ async def generate_chapter_audio(
     voice: str = "af_heart",
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    """Generate audio for a chapter using Kokoro TTS - SAVES TO DATABASE"""
+    """Generate audio for a chapter using external TTS service."""
     
     job_key = f"{novel_slug}_{chapter_number}"
     
@@ -259,7 +377,7 @@ async def generate_chapter_audio(
         if not content or not content.strip():
             raise HTTPException(status_code=400, detail="Chapter content is empty")
         
-        # Check if segments already exist
+        # Check if segments already exist and are ready
         cursor.execute('''
             SELECT COUNT(*) as count 
             FROM segments 
@@ -294,7 +412,7 @@ async def generate_chapter_audio(
     }
 
 
-def run_tts_generation(
+async def run_tts_generation(
     novel_slug: str, 
     chapter_number: int,
     chapter_id: int,
@@ -302,32 +420,21 @@ def run_tts_generation(
     voice: str, 
     job_key: str
 ):
-    """Background task to generate TTS audio - SAVES TO DATABASE"""
-    import sys
-    import re
-    import numpy as np
+    """
+    Background task to generate TTS audio via external service.
+    
+    Flow:
+    1. Split text into chunks (orchestration stays here)
+    2. For each chunk:
+       a. Insert segment with 'processing' status
+       b. Call TTS service (text → audio → R2 → URL)
+       c. Update segment with audio_url and timing
+    3. Track progress in tts_jobs dict
+    """
+    import asyncio
     
     try:
-        # Add src directory to path for Kokoro_main import
-        src_dir = Path(__file__).resolve().parent.parent.parent
-        if str(src_dir) not in sys.path:
-            sys.path.insert(0, str(src_dir))
-        
-        from Kokoro_main import AudioBookGenerator
-        import soundfile as sf
-        
-        # Create output directory
-        output_dir = AUDIO_DIR / novel_slug
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        output_file = output_dir / f"Chapter_{chapter_number:04d}.wav"
-        timing_file = output_dir / f"Chapter_{chapter_number:04d}_timing.json"
-        
-        # Initialize generator
-        logger.info(f"Initializing TTS generator with voice: {voice}")
-        generator = AudioBookGenerator(voice=voice, output_dir=str(AUDIO_DIR), use_gpu=True)
-        
-        # Split text into chunks
+        # Split text into chunks (chunking logic stays in Render)
         chunks = split_text_into_chunks(text, max_length=500)
         logger.info(f"Processing {novel_slug} Ch.{chapter_number}: {len(chunks)} chunks")
         
@@ -340,17 +447,18 @@ def run_tts_generation(
             cursor.execute('DELETE FROM segments WHERE chapter_id = ?', (chapter_id,))
             conn.commit()
         
-        # Generate audio for each chunk and save to database
-        audio_segments = []
+        # Process each chunk
         current_time = 0.0
-        silence_duration = 0.5
-        sample_rate = 24000
+        silence_duration = 0.5  # Gap between segments
         
         for idx, chunk in enumerate(chunks):
             tts_jobs[job_key] = {
                 "status": "generating", 
                 "progress": int((idx / len(chunks)) * 100)
             }
+            
+            # Create unique segment ID (opaque to TTS service)
+            segment_id = f"{novel_slug}_ch{chapter_number}_seg{idx:04d}"
             
             # Insert segment with 'processing' status
             with get_db() as conn:
@@ -359,110 +467,79 @@ def run_tts_generation(
                     INSERT INTO segments (chapter_id, segment_index, text, status, created_at)
                     VALUES (?, ?, ?, 'processing', ?)
                 ''', (chapter_id, idx, chunk.strip(), datetime.utcnow()))
-                segment_id = cursor.lastrowid
+                db_segment_id = cursor.lastrowid
                 conn.commit()
             
-            logger.info(f"  Generating chunk {idx + 1}/{len(chunks)}: {chunk[:50]}...")
-            audio = generator._synthesize(chunk)
-            
-            if audio is not None and len(audio) > 0:
-                segment_duration = len(audio) / sample_rate
+            try:
+                logger.info(f"  Generating chunk {idx + 1}/{len(chunks)}: {chunk[:50]}...")
                 
-                # Update segment with timing data
+                # Call TTS service
+                result = await call_tts_service(chunk, voice, segment_id)
+                
+                # Update segment with timing and audio URL
+                duration = result.get('duration', 0.0)
                 timing_data = {
                     "start": round(current_time, 3),
-                    "end": round(current_time + segment_duration, 3),
-                    "duration": round(segment_duration, 3)
+                    "end": round(current_time + duration, 3),
+                    "duration": round(duration, 3)
                 }
                 
                 with get_db() as conn:
                     cursor = conn.cursor()
                     cursor.execute('''
                         UPDATE segments 
-                        SET timing_data = ?, status = 'ready', last_accessed = ?
+                        SET audio_url = ?, timing_data = ?, status = 'ready', last_accessed = ?
                         WHERE id = ?
-                    ''', (json.dumps(timing_data), datetime.utcnow(), segment_id))
+                    ''', (result['audio_url'], json.dumps(timing_data), datetime.utcnow(), db_segment_id))
                     conn.commit()
                 
-                audio_segments.append(audio)
-                current_time += segment_duration + silence_duration
-                logger.info(f"    ✓ Chunk {idx + 1} saved to DB - {segment_duration:.2f}s")
-            else:
-                # Mark segment as failed
+                current_time += duration + silence_duration
+                logger.info(f"    ✓ Chunk {idx + 1} ready - {duration:.2f}s → {result['audio_url']}")
+                
+            except (TTSUnavailableError, TTSTimeoutError) as e:
+                # Mark segment as failed, continue with next
+                logger.error(f"    ✗ Chunk {idx + 1} failed: {e}")
                 with get_db() as conn:
                     cursor = conn.cursor()
                     cursor.execute('''
                         UPDATE segments SET status = 'failed' WHERE id = ?
-                    ''', (segment_id,))
+                    ''', (db_segment_id,))
                     conn.commit()
-                logger.warning(f"    ✗ Chunk {idx + 1} failed")
+                    
+            except HTTPException as e:
+                # 4xx error (invalid request) - mark failed, don't retry
+                logger.error(f"    ✗ Chunk {idx + 1} invalid: {e.detail}")
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE segments SET status = 'failed' WHERE id = ?
+                    ''', (db_segment_id,))
+                    conn.commit()
         
-        if not audio_segments:
-            raise ValueError("No audio segments were generated")
-        
-        # Combine segments with silence
-        silence = np.zeros(int(sample_rate * silence_duration), dtype=np.float32)
-        combined = []
-        
-        for i, seg in enumerate(audio_segments):
-            combined.append(seg)
-            if i < len(audio_segments) - 1:
-                combined.append(silence)
-        
-        final_audio = np.concatenate(combined)
-        
-        # Save audio file (keep for backward compatibility)
-        sf.write(str(output_file), final_audio, sample_rate)
-        logger.info(f"✓ Audio file saved: {output_file}")
-        
-        # Also save JSON for backward compatibility
+        # Count results
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT segment_index, text, timing_data 
-                FROM segments 
-                WHERE chapter_id = ? AND status = 'ready'
-                ORDER BY segment_index
+                SELECT 
+                    SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) as ready,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+                FROM segments WHERE chapter_id = ?
             ''', (chapter_id,))
-            
-            segments = cursor.fetchall()
-            chunks_data = []
-            for seg in segments:
-                timing = json.loads(seg['timing_data'])
-                chunks_data.append({
-                    "index": seg['segment_index'],
-                    "text": seg['text'],
-                    **timing
-                })
+            stats = cursor.fetchone()
         
-        timing_data_full = {
-            "novel_slug": novel_slug,
-            "chapter_number": chapter_number,
-            "total_duration": round(len(final_audio) / sample_rate, 3),
-            "chunk_count": len(chunks_data),
-            "sample_rate": sample_rate,
-            "silence_duration": silence_duration,
-            "chunks": chunks_data
-        }
-        
-        with open(timing_file, 'w', encoding='utf-8') as f:
-            json.dump(timing_data_full, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"✓ Timing file saved: {timing_file}")
-        
-        duration = len(final_audio) / sample_rate
         tts_jobs[job_key] = {
             "status": "complete", 
-            "path": str(output_file),
-            "progress": 100
+            "progress": 100,
+            "ready_segments": stats['ready'],
+            "failed_segments": stats['failed']
         }
-        logger.info(f"✓✓ Generation complete: {output_file} ({duration:.1f}s total)")
+        logger.info(f"✓✓ Generation complete: {stats['ready']} ready, {stats['failed']} failed")
             
     except Exception as e:
         logger.error(f"❌ TTS generation failed: {e}", exc_info=True)
         tts_jobs[job_key] = {"status": "failed", "error": str(e)}
         
-        # Mark all segments as failed
+        # Mark all processing segments as failed
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -473,7 +550,10 @@ def run_tts_generation(
 
 
 def split_text_into_chunks(text: str, max_length: int = 500) -> list:
-    """Split text into chunks for TTS processing"""
+    """
+    Split text into chunks for TTS processing.
+    Chunking is a product decision, not a model decision - stays in Render.
+    """
     import re
     
     # Split by paragraphs first
