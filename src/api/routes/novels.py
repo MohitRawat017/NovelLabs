@@ -9,7 +9,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
 
-from ..database import get_db, dict_from_row, list_from_rows
+from ..database import get_db, dict_from_row, list_from_rows, db_execute
 from ..models.schemas import NovelResponse, NovelListResponse, NovelCreate
 
 router = APIRouter()
