@@ -128,7 +128,8 @@ async def list_novels(
             count_params.append(f'%{genre}%')
         
         cursor.execute(count_query, count_params)
-        total = cursor.fetchone()[0]
+        count_result = cursor.fetchone()
+        total = count_result['count'] if hasattr(count_result, 'keys') else count_result[0]
     
     return NovelListResponse(novels=novels, total=total)
 
