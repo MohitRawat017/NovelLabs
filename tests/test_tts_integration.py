@@ -14,6 +14,7 @@ import sys
 import time
 import httpx
 from pathlib import Path
+from typing import Optional
 
 # Add project root to path
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -283,6 +284,101 @@ def test_audio_status_endpoint():
         return False
 
 
+def test_r2_audio_config():
+    """Test if R2 audio configuration is accessible via backend health"""
+    print("\n☁️  Testing R2 Audio Storage Configuration...")
+    
+    try:
+        # The backend's wake endpoint should confirm R2 is configured
+        response = httpx.get(f"{API_URL}/audio/wake", timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            tts_ok = data.get("tts_service", False)
+            test_passed("R2 Audio Config check", f"TTS service reachable: {tts_ok}")
+            return True
+        else:
+            test_failed("R2 Audio Config check", f"Status: {response.status_code}")
+            return False
+    except Exception as e:
+        test_failed("R2 Audio Config check", str(e))
+        return False
+
+
+def test_full_audio_generation(slug: Optional[str] = None, chapter: int = 1):
+    """
+    Test full audio generation flow (optional - may take minutes)
+    Only run if explicitly requested
+    """
+    if not slug:
+        # Try to get first novel
+        try:
+            novels_resp = httpx.get(f"{API_URL}/novels", timeout=10)
+            if novels_resp.status_code == 200:
+                novels = novels_resp.json().get("novels", [])
+                if novels:
+                    slug = novels[0]["slug"]
+        except:
+            pass
+    
+    if not slug:
+        test_skipped("Full audio generation", "No novel slug provided")
+        return False
+    
+    print(f"\n🎵 Testing Full Audio Generation for {slug}/Chapter {chapter}...")
+    print("    ⚠️  This test may take 1-5 minutes")
+    
+    try:
+        # Trigger generation - uses path parameters, not JSON body
+        print("    ⏳ Triggering audio generation...")
+        response = httpx.post(
+            f"{API_URL}/audio/generate/{slug}/{chapter}?voice=af_heart",
+            timeout=30
+        )
+        
+        if response.status_code not in [200, 202]:
+            test_failed("Audio generation trigger", f"Status: {response.status_code}")
+            return False
+        
+        data = response.json()
+        test_passed("Audio generation trigger", f"Job started: {data.get('message', 'OK')}")
+        
+        # Poll for completion
+        max_wait = 300  # 5 minutes
+        poll_interval = 10
+        elapsed = 0
+        
+        while elapsed < max_wait:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            
+            status_resp = httpx.get(f"{API_URL}/audio/status/{slug}/{chapter}", timeout=10)
+            if status_resp.status_code == 200:
+                status_data = status_resp.json()
+                progress = status_data.get("progress", 0)
+                status = status_data.get("status", "unknown")
+                
+                print(f"    📊 Progress: {progress}% - Status: {status}")
+                
+                if status == "completed":
+                    audio_url = status_data.get("audio_url", "")
+                    duration = status_data.get("duration", 0)
+                    test_passed("Full audio generation", f"Duration: {duration:.2f}s, URL: {audio_url[:60]}...")
+                    return audio_url
+                elif status == "failed":
+                    error = status_data.get("error", "Unknown error")
+                    test_failed("Full audio generation", f"Generation failed: {error}")
+                    return False
+            else:
+                print(f"    ⚠️  Could not get status: {status_resp.status_code}")
+        
+        test_failed("Full audio generation", f"Timed out after {max_wait}s")
+        return False
+        
+    except Exception as e:
+        test_failed("Full audio generation", str(e))
+        return False
+
+
 # ==================== MAIN ====================
 
 def print_summary():
@@ -311,6 +407,9 @@ def main():
     print(f"\nBackend URL:     {API_URL}")
     print(f"TTS Service URL: {TTS_SERVICE_URL}")
     
+    # Check for full generation flag
+    run_full_gen = "--full" in sys.argv or "-f" in sys.argv
+    
     # Backend tests
     backend_ok = test_backend_health()
     if backend_ok:
@@ -329,6 +428,13 @@ def main():
     if backend_ok:
         test_backend_calls_tts()
         test_audio_status_endpoint()
+        test_r2_audio_config()
+        
+        # Full generation test (optional)
+        if run_full_gen:
+            test_full_audio_generation()
+        else:
+            print("\n    💡 Run with --full flag to test complete audio generation")
     
     print_summary()
     

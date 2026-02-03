@@ -3,19 +3,20 @@ Audio API routes - handles TTS generation via external TTS service
 Segments are stored per-chunk with audio_url pointing to R2 CDN
 
 ARCHITECTURE:
-- Render backend (this file): Orchestration, chunking, DB storage
+- Render backend (this file): Orchestration, chunking, DB storage, audio concatenation
 - Lightning AI: Stateless TTS (text → audio → R2 → URL)
-- Cloudflare R2: Audio file storage
+- Cloudflare R2: Audio file storage (both segments and full chapters)
 """
 
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import logging
 import json
 import httpx
+import io
 from datetime import datetime
 
 router = APIRouter()
@@ -26,6 +27,9 @@ from ..config import TTS_SERVICE_URL, TTS_TIMEOUT
 
 # Import database utilities
 from ..database import get_db
+
+# Import R2 client for uploading concatenated audio
+from ..r2_client import upload_chapter_audio_to_r2, download_audio_from_url
 
 # Base directories (for backward compatibility during migration)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
@@ -513,11 +517,12 @@ async def run_tts_generation(
     
     Flow:
     1. Split text into chunks
-    2. For each chunk, call TTS service to get audio
-    3. Track timing data for each chunk
-    4. Concatenate all audio into single file (if pydub available)
-    5. Upload final audio to R2
+    2. For each chunk, call TTS service to get audio segment
+    3. Download each audio segment from R2
+    4. Concatenate all audio into single WAV file using pydub
+    5. Upload final concatenated audio to R2
     6. Save timing data to database
+    7. Optionally clean up individual segment files
     """
     try:
         # Split text into chunks
@@ -536,14 +541,15 @@ async def run_tts_generation(
             ''', (novel_slug, chapter_number))
             conn.commit()
         
-        # Process each chunk
+        # Process each chunk - collect audio URLs and timing data
         current_time = 0.0
         silence_gap = 0.3  # Gap between chunks in seconds
         timings = []
-        audio_urls = []  # Store individual chunk URLs for potential concatenation
+        audio_urls = []
+        failed_chunks = []
         
         for idx, chunk in enumerate(chunks):
-            progress = int((idx / len(chunks)) * 100)
+            progress = int((idx / len(chunks)) * 90)  # Reserve 10% for concatenation
             tts_jobs[job_key] = {"status": "generating", "progress": progress}
             
             # Update progress in database
@@ -591,28 +597,30 @@ async def run_tts_generation(
                 
             except (TTSUnavailableError, TTSTimeoutError) as e:
                 logger.error(f"    ✗ Chunk {idx + 1} failed: {e}")
-                # Continue with next chunk, but note the failure
-                timings.append({
-                    "chunk_index": idx,
-                    "start_time": current_time,
-                    "end_time": current_time,
-                    "text": chunk.strip(),
-                    "error": str(e)
-                })
+                failed_chunks.append(idx)
+                audio_urls.append(None)
                 
             except HTTPException as e:
                 logger.error(f"    ✗ Chunk {idx + 1} invalid: {e.detail}")
-                timings.append({
-                    "chunk_index": idx,
-                    "start_time": current_time,
-                    "end_time": current_time,
-                    "text": chunk.strip(),
-                    "error": e.detail
-                })
+                failed_chunks.append(idx)
+                audio_urls.append(None)
         
-        # For now, use the first chunk's audio as the "full" audio
-        # TODO: Implement actual audio concatenation with pydub
-        final_audio_url = audio_urls[0] if audio_urls else None
+        # Check if we have enough audio to proceed
+        valid_urls = [url for url in audio_urls if url]
+        if not valid_urls:
+            raise ValueError("No audio segments generated successfully")
+        
+        logger.info(f"Generated {len(valid_urls)}/{len(chunks)} segments, now concatenating...")
+        tts_jobs[job_key] = {"status": "concatenating", "progress": 92}
+        
+        # Concatenate audio segments
+        final_audio_url = await concatenate_and_upload_audio(
+            audio_urls=audio_urls,
+            novel_slug=novel_slug,
+            chapter_number=chapter_number,
+            silence_gap_ms=int(silence_gap * 1000)
+        )
+        
         total_duration = current_time - silence_gap if current_time > 0 else 0
         
         # Update chapter_audio record
@@ -629,9 +637,11 @@ async def run_tts_generation(
             "status": "complete", 
             "progress": 100,
             "chunks": len(chunks),
-            "duration": total_duration
+            "failed_chunks": len(failed_chunks),
+            "duration": total_duration,
+            "audio_url": final_audio_url
         }
-        logger.info(f"✓✓ Generation complete: {len(timings)} chunks, {total_duration:.2f}s total")
+        logger.info(f"✓✓ Generation complete: {len(timings)} chunks, {total_duration:.2f}s, URL: {final_audio_url}")
             
     except Exception as e:
         logger.error(f"❌ TTS generation failed: {e}", exc_info=True)
@@ -646,6 +656,94 @@ async def run_tts_generation(
                 WHERE novel_slug = ? AND chapter_number = ?
             ''', (str(e), datetime.utcnow(), novel_slug, chapter_number))
             conn.commit()
+
+
+async def concatenate_and_upload_audio(
+    audio_urls: List[Optional[str]],
+    novel_slug: str,
+    chapter_number: int,
+    silence_gap_ms: int = 300
+) -> Optional[str]:
+    """
+    Download audio segments, concatenate them, and upload the final audio to R2.
+    
+    Args:
+        audio_urls: List of R2 URLs for each segment (None for failed segments)
+        novel_slug: Novel identifier
+        chapter_number: Chapter number
+        silence_gap_ms: Gap between segments in milliseconds
+    
+    Returns:
+        URL of the uploaded concatenated audio, or None if failed
+    """
+    try:
+        from pydub import AudioSegment
+    except ImportError:
+        logger.error("pydub not installed - cannot concatenate audio")
+        # Fallback: return first valid URL
+        for url in audio_urls:
+            if url:
+                return url
+        return None
+    
+    audio_segments = []
+    
+    # Create silence segment for gaps
+    silence = AudioSegment.silent(duration=silence_gap_ms)
+    
+    for idx, url in enumerate(audio_urls):
+        if url is None:
+            # Skip failed segments, but add silence as placeholder
+            audio_segments.append(silence)
+            continue
+        
+        try:
+            # Download audio bytes
+            audio_bytes = download_audio_from_url(url)
+            if audio_bytes is None:
+                logger.warning(f"Could not download segment {idx}, adding silence")
+                audio_segments.append(silence)
+                continue
+            
+            # Load as AudioSegment
+            segment = AudioSegment.from_wav(io.BytesIO(audio_bytes))
+            audio_segments.append(segment)
+            
+            # Add silence gap after each segment (except last)
+            if idx < len(audio_urls) - 1:
+                audio_segments.append(silence)
+                
+        except Exception as e:
+            logger.warning(f"Could not load segment {idx}: {e}, adding silence")
+            audio_segments.append(silence)
+    
+    if not audio_segments:
+        logger.error("No audio segments to concatenate")
+        return None
+    
+    # Concatenate all segments
+    logger.info(f"Concatenating {len(audio_segments)} segments...")
+    
+    final_audio = audio_segments[0]
+    for segment in audio_segments[1:]:
+        final_audio = final_audio + segment
+    
+    # Export to bytes
+    output_buffer = io.BytesIO()
+    final_audio.export(output_buffer, format="wav")
+    output_buffer.seek(0)
+    final_audio_bytes = output_buffer.read()
+    
+    logger.info(f"Concatenated audio: {len(final_audio_bytes)} bytes, {len(final_audio) / 1000:.2f}s")
+    
+    # Upload to R2
+    final_url = upload_chapter_audio_to_r2(
+        audio_bytes=final_audio_bytes,
+        novel_slug=novel_slug,
+        chapter_number=chapter_number
+    )
+    
+    return final_url
 
 
 def split_text_into_chunks(text: str, max_length: int = 500) -> list:

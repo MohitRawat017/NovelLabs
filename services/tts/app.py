@@ -25,7 +25,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from .r2_upload import upload_audio_to_r2
+from r2_upload import upload_audio_to_r2
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')

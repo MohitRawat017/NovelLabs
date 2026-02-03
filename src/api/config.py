@@ -39,6 +39,15 @@ AUDIO_STORAGE_BACKEND = os.getenv("AUDIO_STORAGE_BACKEND", "cloud")
 # This is just for backward compatibility during migration
 AUDIO_DIR = os.getenv("AUDIO_DIR", "audio")
 
+# ==================== R2 Audio Storage (Backend) ====================
+# The backend needs R2 credentials to upload concatenated chapter audio
+
+R2_AUDIO_ACCOUNT_ID = os.getenv("R2_AUDIO_ACCOUNT_ID", "")
+R2_AUDIO_ACCESS_KEY_ID = os.getenv("R2_AUDIO_ACCESS_KEY_ID", "")
+R2_AUDIO_SECRET_ACCESS_KEY = os.getenv("R2_AUDIO_SECRET_ACCESS_KEY", "")
+R2_AUDIO_BUCKET_NAME = os.getenv("R2_AUDIO_BUCKET_NAME", "novellabs-audio")
+R2_AUDIO_PUBLIC_URL = os.getenv("R2_AUDIO_PUBLIC_URL", "")
+
 # ==================== CORS ====================
 
 # Comma-separated list of allowed origins

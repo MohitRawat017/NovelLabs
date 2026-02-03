@@ -19,5 +19,9 @@ httpx>=0.27.0  # For calling TTS service
 python-dotenv>=1.0.0
 psycopg2-binary>=2.9.9  # PostgreSQL support for Render
 
+# Audio processing & Cloud storage (for concatenation and R2 upload)
+pydub>=0.25.1  # Audio concatenation
+boto3>=1.34.0  # Cloudflare R2 (S3-compatible)
+
 # Note: TTS (Kokoro, torch, soundfile) moved to services/tts/
 # Render backend no longer runs TTS directly - it calls Lightning AI
