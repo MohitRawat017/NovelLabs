@@ -4,6 +4,7 @@ Novels API routes
 
 import os
 import re
+import logging
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
@@ -13,6 +14,7 @@ from ..database import get_db, dict_from_row, list_from_rows, db_execute
 from ..models.schemas import NovelResponse, NovelListResponse, NovelCreate
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Base directory for scraped data
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
@@ -94,44 +96,52 @@ async def list_novels(
     offset: int = Query(0, ge=0)
 ):
     """Get all novels with optional filtering"""
-    # Sync from filesystem first
-    sync_novels_to_db()
+    try:
+        # Sync from filesystem first
+        sync_novels_to_db()
+    except Exception as e:
+        logger.error(f"Failed to sync novels to DB: {e}")
+        # Continue without sync - try to serve from DB anyway
     
-    with get_db() as conn:
-        cursor = conn.cursor()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            
+            query = 'SELECT * FROM novels WHERE 1=1'
+            params = []
+            
+            if search:
+                query += ' AND title LIKE ?'
+                params.append(f'%{search}%')
+            
+            if genre and genre != 'all':
+                query += ' AND genres LIKE ?'
+                params.append(f'%{genre}%')
+            
+            query += ' ORDER BY last_updated DESC LIMIT ? OFFSET ?'
+            params.extend([limit, offset])
+            
+            cursor.execute(query, params)
+            novels = list_from_rows(cursor.fetchall())
+            
+            # Get total count
+            count_query = 'SELECT COUNT(*) FROM novels WHERE 1=1'
+            count_params = []
+            if search:
+                count_query += ' AND title LIKE ?'
+                count_params.append(f'%{search}%')
+            if genre and genre != 'all':
+                count_query += ' AND genres LIKE ?'
+                count_params.append(f'%{genre}%')
+            
+            cursor.execute(count_query, count_params)
+            count_result = cursor.fetchone()
+            total = count_result['count'] if hasattr(count_result, 'keys') else count_result[0]
         
-        query = 'SELECT * FROM novels WHERE 1=1'
-        params = []
-        
-        if search:
-            query += ' AND title LIKE ?'
-            params.append(f'%{search}%')
-        
-        if genre and genre != 'all':
-            query += ' AND genres LIKE ?'
-            params.append(f'%{genre}%')
-        
-        query += ' ORDER BY last_updated DESC LIMIT ? OFFSET ?'
-        params.extend([limit, offset])
-        
-        cursor.execute(query, params)
-        novels = list_from_rows(cursor.fetchall())
-        
-        # Get total count
-        count_query = 'SELECT COUNT(*) FROM novels WHERE 1=1'
-        count_params = []
-        if search:
-            count_query += ' AND title LIKE ?'
-            count_params.append(f'%{search}%')
-        if genre and genre != 'all':
-            count_query += ' AND genres LIKE ?'
-            count_params.append(f'%{genre}%')
-        
-        cursor.execute(count_query, count_params)
-        count_result = cursor.fetchone()
-        total = count_result['count'] if hasattr(count_result, 'keys') else count_result[0]
-    
-    return NovelListResponse(novels=novels, total=total)
+        return NovelListResponse(novels=novels, total=total)
+    except Exception as e:
+        logger.error(f"Database error in list_novels: {e}")
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {str(e)}")
 
 
 @router.get("/{slug}", response_model=NovelResponse)
