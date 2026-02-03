@@ -72,6 +72,56 @@ def get_s3_client():
     return _s3_client
 
 
+def check_chapter_exists_in_r2(novel_slug: str, chapter_number: int) -> bool:
+    """
+    Check if a chapter already exists in R2.
+    Returns True if exists, False otherwise.
+    """
+    client = get_s3_client()
+    if not client:
+        return False
+    
+    key = f"novels/{novel_slug}/chapter_{chapter_number:04d}.txt"
+    
+    try:
+        client.head_object(Bucket=R2_NOVEL_BUCKET_NAME, Key=key)
+        return True  # File exists
+    except client.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return False  # File doesn't exist
+        # Other errors - assume doesn't exist to allow upload attempt
+        return False
+
+
+def get_existing_chapters_in_r2(novel_slug: str) -> set:
+    """
+    Get a set of chapter numbers that already exist in R2 for a novel.
+    This is more efficient than checking each chapter individually.
+    """
+    client = get_s3_client()
+    if not client:
+        return set()
+    
+    existing = set()
+    prefix = f"novels/{novel_slug}/"
+    
+    try:
+        paginator = client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=R2_NOVEL_BUCKET_NAME, Prefix=prefix)
+        
+        for page in pages:
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    # Extract chapter number from key like "novels/slug/chapter_0001.txt"
+                    match = re.search(r'chapter_(\d+)\.txt$', obj['Key'])
+                    if match:
+                        existing.add(int(match.group(1)))
+    except Exception as e:
+        print(f"[WARN] Could not list existing chapters: {e}")
+    
+    return existing
+
+
 def upload_chapter_to_r2(content: str, novel_slug: str, chapter_number: int) -> Optional[str]:
     """
     Upload chapter content to R2 and return the public URL.
@@ -173,7 +223,7 @@ def update_chapter_content_url(client: httpx.Client, novel_slug: str, chapter_nu
 
 
 def upload_novel_to_r2(novel: dict, http_client: httpx.Client, limit: Optional[int] = None):
-    """Upload all chapters of a novel to R2"""
+    """Upload all chapters of a novel to R2, skipping already uploaded chapters"""
     chapter_files = novel['chapter_files']
     
     if limit:
@@ -182,9 +232,15 @@ def upload_novel_to_r2(novel: dict, http_client: httpx.Client, limit: Optional[i
     total = len(chapter_files)
     success = 0
     fail = 0
+    skipped = 0
     total_bytes = 0
     
-    print(f"\n[INFO] Uploading {total} chapters of {novel['title']} to R2...")
+    # Get existing chapters in R2 to skip re-uploading
+    print(f"\n[INFO] Checking existing chapters in R2 for {novel['title']}...")
+    existing_chapters = get_existing_chapters_in_r2(novel['slug'])
+    print(f"[INFO] Found {len(existing_chapters)} chapters already in R2")
+    
+    print(f"[INFO] Processing {total} chapters of {novel['title']}...")
     
     for i, filepath in enumerate(chapter_files, 1):
         # Extract chapter number
@@ -193,6 +249,13 @@ def upload_novel_to_r2(novel: dict, http_client: httpx.Client, limit: Optional[i
             continue
         
         chapter_number = int(match.group(1))
+        
+        # Skip if already exists in R2
+        if chapter_number in existing_chapters:
+            skipped += 1
+            if i % 500 == 0 or i == total:
+                print(f"  Progress: {i}/{total} (new:{success} skip:{skipped} fail:{fail})")
+            continue
         
         # Read content
         title, content, word_count = read_chapter_content(filepath)
@@ -217,12 +280,12 @@ def upload_novel_to_r2(novel: dict, http_client: httpx.Client, limit: Optional[i
         # Progress
         if i % 100 == 0 or i == total:
             mb = total_bytes / 1024 / 1024
-            print(f"  Progress: {i}/{total} (ok:{success} fail:{fail}) | Uploaded: {mb:.1f} MB")
+            print(f"  Progress: {i}/{total} (new:{success} skip:{skipped} fail:{fail}) | Uploaded: {mb:.1f} MB")
         
         time.sleep(0.02)  # Small delay to avoid rate limiting
     
     mb = total_bytes / 1024 / 1024
-    print(f"[DONE] {novel['title']}: {success}/{total} uploaded ({mb:.1f} MB)")
+    print(f"[DONE] {novel['title']}: {success} new, {skipped} skipped, {fail} failed | Uploaded: {mb:.1f} MB")
 
 
 def main():

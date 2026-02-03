@@ -129,11 +129,57 @@ function ChapterReader() {
 
     if (!chapter) return null;
 
+    // Smart text segmenter - splits text into readable chunks (similar to backend segmenter)
+    const segmentText = (text, maxChars = 250, minChars = 120) => {
+        const paragraphs = text.split(/\n+/).filter(p => p.trim());
+        const chunks = [];
+
+        for (const paragraph of paragraphs) {
+            const trimmed = paragraph.trim();
+            if (!trimmed) continue;
+
+            // If paragraph is short enough, add it as a single chunk
+            if (trimmed.length <= maxChars) {
+                chunks.push(trimmed);
+                continue;
+            }
+
+            // Split long paragraphs by sentences
+            const sentences = trimmed.match(/[^.!?]+[.!?]+/g) || [trimmed];
+            let currentChunk = '';
+
+            for (const sentence of sentences) {
+                const sentenceTrimmed = sentence.trim();
+                if (!sentenceTrimmed) continue;
+
+                // If adding this sentence would exceed maxChars, save current chunk and start new one
+                if (currentChunk && (currentChunk.length + sentenceTrimmed.length + 1) > maxChars) {
+                    if (currentChunk.length >= minChars) {
+                        chunks.push(currentChunk);
+                        currentChunk = sentenceTrimmed;
+                    } else {
+                        // Current chunk is too small, add sentence anyway
+                        currentChunk += ' ' + sentenceTrimmed;
+                    }
+                } else {
+                    currentChunk = currentChunk ? currentChunk + ' ' + sentenceTrimmed : sentenceTrimmed;
+                }
+            }
+
+            // Don't forget the last chunk
+            if (currentChunk) {
+                chunks.push(currentChunk);
+            }
+        }
+
+        return chunks;
+    };
+
     // Render chapter content with karaoke highlighting when audio is playing
     const renderChapterContent = () => {
-        // If we have chunk timings and audio is active, show chunked content
+        // If we have chunk timings and audio is active, show chunked content with karaoke highlighting
         if (chunkTimings && chunkTimings.chunks && showAudio) {
-            console.log('Rendering with chunks, active index:', activeChunkIndex);
+            console.log('Rendering with audio chunks, active index:', activeChunkIndex);
             return (
                 <>
                     {chunkTimings.chunks.map((chunk, idx) => (
@@ -149,9 +195,10 @@ function ChapterReader() {
             );
         }
 
-        // Default: show regular paragraphs
-        return chapter.content.split('\n\n').map((paragraph, idx) => (
-            paragraph.trim() && <p key={idx}>{paragraph}</p>
+        // Default: show smartly segmented paragraphs for better readability
+        const segments = segmentText(chapter.content);
+        return segments.map((segment, idx) => (
+            <p key={idx} className="chunk">{segment}</p>
         ));
     };
 
