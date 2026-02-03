@@ -4,14 +4,23 @@ Main application entry point
 """
 
 import os
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
+# Configure logging early
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+logger.info("Starting NovelLabs API...")
+
 from .routes import novels, chapters, scraper, audio
 from .database import init_db
 from .config import ALLOWED_ORIGINS
+
+logger.info("Imports completed successfully")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -50,8 +59,7 @@ if audio_dir.exists():
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
-    import logging
-    logger = logging.getLogger(__name__)
+    logger.info("Running startup event...")
     try:
         logger.info("Initializing database...")
         init_db()
@@ -59,7 +67,6 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         # Don't raise - allow app to start for health checks
-        # raise e
 
 
 @app.get("/")

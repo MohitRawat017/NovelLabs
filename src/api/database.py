@@ -39,7 +39,8 @@ def get_connection():
     """Get a database connection (SQLite or PostgreSQL)"""
     if IS_POSTGRES:
         try:
-            conn = psycopg2.connect(DATABASE_URL)
+            # Add connection timeout to prevent hanging
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
             logger.info("PostgreSQL connection established")
             return conn
         except Exception as e:

@@ -5,6 +5,10 @@ Environment-based configuration for the FastAPI backend on Render.
 """
 
 import os
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ==================== TTS Service ====================
 
@@ -20,6 +24,8 @@ TTS_TIMEOUT = int(os.getenv("TTS_TIMEOUT", "30"))
 # Render uses postgres:// but psycopg2 expects postgresql://
 _db_url = os.getenv("DATABASE_URL", "sqlite:///data/novels.db")
 DATABASE_URL = _db_url.replace("postgres://", "postgresql://", 1) if _db_url.startswith("postgres://") else _db_url
+
+logger.info(f"Database URL configured (scheme: {_db_url.split('://')[0] if '://' in _db_url else 'unknown'})")
 
 # ==================== Audio Storage ====================
 
