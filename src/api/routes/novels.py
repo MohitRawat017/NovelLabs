@@ -141,6 +141,43 @@ async def list_novels(
         raise HTTPException(status_code=503, detail=f"Database unavailable: {str(e)}")
 
 
+@router.delete("/admin/clear-all")
+async def clear_all_novels():
+    """
+    DANGER: Delete ALL novels and chapters from database
+    
+    Use this to reset the database before re-migration.
+    This is irreversible!
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Get counts before deletion
+        cursor.execute('SELECT COUNT(*) FROM chapters')
+        result = cursor.fetchone()
+        chapters_count = result[0] if isinstance(result, (list, tuple)) else result.get('count', 0)
+        
+        cursor.execute('SELECT COUNT(*) FROM novels')
+        result = cursor.fetchone()
+        novels_count = result[0] if isinstance(result, (list, tuple)) else result.get('count', 0)
+        
+        # Delete chapters first (foreign key)
+        cursor.execute('DELETE FROM chapters')
+        
+        # Delete novels
+        cursor.execute('DELETE FROM novels')
+        
+        conn.commit()
+        
+        logger.info(f"Cleared database: {novels_count} novels, {chapters_count} chapters")
+        
+        return {
+            'message': 'Database cleared successfully',
+            'deleted_novels': novels_count,
+            'deleted_chapters': chapters_count
+        }
+
+
 @router.get("/{slug}", response_model=NovelResponse)
 async def get_novel(slug: str):
     """Get a single novel by slug"""
@@ -201,43 +238,6 @@ async def sync_novels():
     except Exception as e:
         logger.error(f"Sync failed: {e}")
         raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
-
-
-@router.delete("/admin/clear-all")
-async def clear_all_novels():
-    """
-    DANGER: Delete ALL novels and chapters from database
-    
-    Use this to reset the database before re-migration.
-    This is irreversible!
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Get counts before deletion
-        cursor.execute('SELECT COUNT(*) FROM chapters')
-        result = cursor.fetchone()
-        chapters_count = result[0] if isinstance(result, (list, tuple)) else result.get('count', 0)
-        
-        cursor.execute('SELECT COUNT(*) FROM novels')
-        result = cursor.fetchone()
-        novels_count = result[0] if isinstance(result, (list, tuple)) else result.get('count', 0)
-        
-        # Delete chapters first (foreign key)
-        cursor.execute('DELETE FROM chapters')
-        
-        # Delete novels
-        cursor.execute('DELETE FROM novels')
-        
-        conn.commit()
-        
-        logger.info(f"Cleared database: {novels_count} novels, {chapters_count} chapters")
-        
-        return {
-            'message': 'Database cleared successfully',
-            'deleted_novels': novels_count,
-            'deleted_chapters': chapters_count
-        }
 
 
 @router.post("/{slug}/update")
