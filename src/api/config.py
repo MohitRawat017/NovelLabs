@@ -20,9 +20,11 @@ TTS_TIMEOUT = int(os.getenv("TTS_TIMEOUT", "30"))
 
 # ==================== Database ====================
 
-# SQLite for local dev, PostgreSQL for production
+# PostgreSQL on Render (required - no SQLite fallback)
 # Render uses postgres:// but psycopg2 expects postgresql://
-_db_url = os.getenv("DATABASE_URL", "sqlite:///data/novels.db")
+_db_url = os.getenv("DATABASE_URL")
+if not _db_url:
+    raise ValueError("DATABASE_URL environment variable is required")
 DATABASE_URL = _db_url.replace("postgres://", "postgresql://", 1) if _db_url.startswith("postgres://") else _db_url
 
 logger.info(f"Database URL configured (scheme: {_db_url.split('://')[0] if '://' in _db_url else 'unknown'})")

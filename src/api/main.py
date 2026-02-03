@@ -2,9 +2,11 @@
 NovelLabs FastAPI Backend
 Main application entry point
 FIXED: Sync novels once on startup + added shutdown handler for connection pool
+Added: TTS service wake-up on startup (double-wake strategy)
 """
 import os
 import logging
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +19,7 @@ logger.info("Starting NovelLabs API...")
 
 from .routes import novels, chapters, scraper, audio
 from .database import init_db, close_connection_pool
-from .config import ALLOWED_ORIGINS
+from .config import ALLOWED_ORIGINS, TTS_SERVICE_URL
 
 logger.info("Imports completed successfully")
 
@@ -56,7 +58,7 @@ if audio_dir.exists():
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database and sync novels on startup"""
+    """Initialize database, sync novels, and wake up TTS service"""
     logger.info("Running startup event...")
     try:
         logger.info("Initializing database...")
@@ -72,6 +74,24 @@ async def startup_event():
         except Exception as e:
             logger.error(f"Failed to sync novels on startup: {e}")
             # Don't fail startup if sync fails
+        
+        # Double-wake strategy: Wake up Lightning AI TTS service
+        # This runs async in background - don't block startup
+        try:
+            logger.info(f"Pinging TTS service at {TTS_SERVICE_URL}...")
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{TTS_SERVICE_URL}/", timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    logger.info(f"TTS service responded: model_loaded={data.get('model_loaded')}")
+                else:
+                    logger.warning(f"TTS service returned {response.status_code}")
+        except httpx.ConnectError:
+            logger.warning(f"TTS service not reachable at {TTS_SERVICE_URL} (may be sleeping)")
+        except httpx.ReadTimeout:
+            logger.info("TTS service is waking up (timeout expected)")
+        except Exception as e:
+            logger.warning(f"Could not ping TTS service: {e}")
         
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")

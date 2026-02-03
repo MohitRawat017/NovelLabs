@@ -108,8 +108,15 @@ class UserPreferences(Base):
 
 
 # Database connection helpers
-def get_engine(database_url: str = "sqlite:///data/novels.db"):
-    """Create SQLAlchemy engine"""
+def get_engine(database_url: str = None):
+    """Create SQLAlchemy engine for PostgreSQL"""
+    import os
+    if database_url is None:
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            raise ValueError("DATABASE_URL environment variable is required")
+        # Render uses postgres:// but SQLAlchemy expects postgresql://
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
     return create_engine(database_url, echo=False)
 
 

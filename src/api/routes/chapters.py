@@ -64,8 +64,8 @@ def sync_chapters_for_novel(novel_id: int, data_path: str):
             audio_file = AUDIO_DIR / novel_folder / f"Chapter_{chapter_number:04d}.wav"
             audio_path = str(audio_file) if audio_file.exists() else None
             
-            # FIXED: Insert or update chapter WITHOUT content
-            # Use INSERT OR REPLACE for SQLite, ON CONFLICT for PostgreSQL
+            # Insert or update chapter WITHOUT content
+            # Uses PostgreSQL ON CONFLICT for upsert
             cursor.execute('''
                 INSERT INTO chapters 
                 (novel_id, chapter_number, title, content_path, audio_path, word_count)

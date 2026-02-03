@@ -150,6 +150,78 @@ async def call_tts_service(text: str, voice: str, segment_id: str) -> dict:
 
 # ==================== Endpoints ====================
 
+@router.get("/wake")
+async def wake_tts_service():
+    """
+    Wake up the Lightning AI TTS service.
+    
+    Call this endpoint to ensure TTS service is awake before generating audio.
+    Lightning AI studios sleep after 10 min of inactivity.
+    
+    Returns the TTS service status.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{TTS_SERVICE_URL}/", timeout=60)  # Long timeout for cold start
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "status": "awake",
+                    "tts_service": TTS_SERVICE_URL,
+                    "model_loaded": data.get("model_loaded", False),
+                    "gpu_available": data.get("gpu_available", False)
+                }
+            else:
+                return {
+                    "status": "error",
+                    "tts_service": TTS_SERVICE_URL,
+                    "error": f"TTS service returned {response.status_code}"
+                }
+    except httpx.ConnectError:
+        return {
+            "status": "sleeping",
+            "tts_service": TTS_SERVICE_URL,
+            "error": "TTS service not reachable (may be sleeping)",
+            "hint": "Try again in 30-60 seconds"
+        }
+    except httpx.ReadTimeout:
+        return {
+            "status": "waking",
+            "tts_service": TTS_SERVICE_URL,
+            "message": "TTS service is waking up, model loading...",
+            "hint": "Try again in 30-60 seconds"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "tts_service": TTS_SERVICE_URL,
+            "error": str(e)
+        }
+
+
+@router.get("/health")
+async def tts_health_check():
+    """Quick health check for TTS service connectivity."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{TTS_SERVICE_URL}/", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "tts_available": True,
+                    "model_loaded": data.get("model_loaded", False),
+                    "gpu_enabled": data.get("gpu_enabled", False)
+                }
+    except Exception:
+        pass
+    
+    return {
+        "tts_available": False,
+        "model_loaded": False,
+        "gpu_enabled": False
+    }
+
+
 @router.get("/voices")
 async def list_voices():
     """List available English TTS voices."""
@@ -180,19 +252,15 @@ async def stream_chapter_audio(novel_slug: str, chapter_number: int):
     """
     Stream/redirect to audio for a chapter.
     
-    New behavior: Redirects to first segment's audio_url from R2.
-    Legacy: Returns local file if it exists.
+    Checks chapter_audio table for full chapter audio URL.
+    Falls back to local filesystem for legacy files.
     """
-    # Check for segments with audio URLs in database
+    # Check for full chapter audio in database
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT s.audio_url FROM segments s
-            JOIN chapters c ON s.chapter_id = c.id
-            JOIN novels n ON c.novel_id = n.id
-            WHERE n.slug = ? AND c.chapter_number = ? AND s.status = 'ready'
-            ORDER BY s.segment_index ASC
-            LIMIT 1
+            SELECT audio_url FROM chapter_audio
+            WHERE novel_slug = ? AND chapter_number = ? AND status = 'completed'
         ''', (novel_slug, chapter_number))
         
         result = cursor.fetchone()
@@ -218,50 +286,44 @@ async def stream_chapter_audio(novel_slug: str, chapter_number: int):
 
 @router.get("/status/{novel_slug}/{chapter_number}")
 async def check_audio_status(novel_slug: str, chapter_number: int):
-    """Check if audio exists for a chapter - checks both DB and filesystem."""
+    """Check if audio exists for a chapter."""
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Get chapter_id
+        # Check chapter_audio table for full chapter audio
         cursor.execute('''
-            SELECT c.id FROM chapters c
-            JOIN novels n ON c.novel_id = n.id
-            WHERE n.slug = ? AND c.chapter_number = ?
+            SELECT status, audio_url, duration, progress, error
+            FROM chapter_audio
+            WHERE novel_slug = ? AND chapter_number = ?
         ''', (novel_slug, chapter_number))
         
         result = cursor.fetchone()
-        if not result:
-            raise HTTPException(status_code=404, detail="Chapter not found")
         
-        chapter_id = result['id']
-        
-        # Check if segments exist and are ready
-        cursor.execute('''
-            SELECT COUNT(*) as total,
-                   SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) as ready_count,
-                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count
-            FROM segments
-            WHERE chapter_id = ?
-        ''', (chapter_id,))
-        
-        segment_stats = cursor.fetchone()
-        has_segments = segment_stats['total'] > 0
-        all_ready = segment_stats['total'] == segment_stats['ready_count'] if has_segments else False
-        has_failures = segment_stats['failed_count'] > 0 if has_segments else False
+        if result:
+            status = result['status']
+            return {
+                "exists": status == 'completed',
+                "generating": status == 'generating',
+                "status": status,
+                "audio_url": result['audio_url'] if status == 'completed' else None,
+                "duration": result['duration'],
+                "progress": result['progress'] or 0,
+                "error": result['error']
+            }
     
     # Check filesystem as fallback
     audio_path = AUDIO_DIR / novel_slug / f"Chapter_{chapter_number:04d}.wav"
     
+    # Check in-memory job status
     job_key = f"{novel_slug}_{chapter_number}"
     job = tts_jobs.get(job_key, {})
     
     return {
-        "exists": all_ready or audio_path.exists(),
-        "segments_in_db": has_segments,
-        "segments_ready": all_ready,
-        "segments_failed": has_failures,
-        "audio_file_exists": audio_path.exists(),
+        "exists": audio_path.exists(),
         "generating": job.get("status") == "generating",
+        "status": "completed" if audio_path.exists() else ("generating" if job.get("status") == "generating" else "not_found"),
+        "audio_url": None,
+        "duration": None,
         "progress": job.get("progress", 0),
         "error": job.get("error")
     }
@@ -269,66 +331,60 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
 
 @router.get("/timings/{novel_slug}/{chapter_number}")
 async def get_chapter_timings(novel_slug: str, chapter_number: int):
-    """Get chunk timing data for karaoke-style highlighting - from database."""
+    """Get chunk timing data for karaoke-style highlighting."""
     
     with get_db() as conn:
         cursor = conn.cursor()
         
-        # Get chapter_id
+        # Get timings from audio_timings table
         cursor.execute('''
-            SELECT c.id FROM chapters c
-            JOIN novels n ON c.novel_id = n.id
-            WHERE n.slug = ? AND c.chapter_number = ?
+            SELECT chunk_index, start_time, end_time, text
+            FROM audio_timings
+            WHERE novel_slug = ? AND chapter_number = ?
+            ORDER BY chunk_index ASC
         ''', (novel_slug, chapter_number))
         
-        result = cursor.fetchone()
-        if not result:
-            raise HTTPException(status_code=404, detail="Chapter not found")
+        timings = cursor.fetchall()
         
-        chapter_id = result['id']
-        
-        # Get segments with timing data and audio URLs
-        cursor.execute('''
-            SELECT segment_index, text, timing_data, audio_url, status
-            FROM segments
-            WHERE chapter_id = ?
-            ORDER BY segment_index ASC
-        ''', (chapter_id,))
-        
-        segments = cursor.fetchall()
-        
-        if not segments:
+        if not timings:
+            # Check if audio exists but no timings
+            cursor.execute('''
+                SELECT status FROM chapter_audio
+                WHERE novel_slug = ? AND chapter_number = ?
+            ''', (novel_slug, chapter_number))
+            
+            audio_status = cursor.fetchone()
+            if audio_status:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Audio status is '{audio_status['status']}' but no timing data found."
+                )
+            
             raise HTTPException(
                 status_code=404,
-                detail="No segments found. Generate audio first."
+                detail="No timing data found. Generate audio first."
             )
         
-        # Build response from DB segments
+        # Build response
         chunks = []
         total_duration = 0.0
         
-        for seg in segments:
-            timing = json.loads(seg['timing_data']) if seg['timing_data'] else {}
-            
+        for t in timings:
             chunk_data = {
-                "index": seg['segment_index'],
-                "text": seg['text'],
-                "start": timing.get('start', 0.0),
-                "end": timing.get('end', 0.0),
-                "duration": timing.get('duration', 0.0),
-                "audio_url": seg['audio_url'],
-                "status": seg['status']
+                "index": t['chunk_index'],
+                "text": t['text'],
+                "start": t['start_time'],
+                "end": t['end_time']
             }
             chunks.append(chunk_data)
-            total_duration = max(total_duration, chunk_data['end'])
+            total_duration = max(total_duration, t['end_time'])
         
         return {
             "novel_slug": novel_slug,
             "chapter_number": chapter_number,
             "total_duration": round(total_duration, 3),
             "chunk_count": len(chunks),
-            "chunks": chunks,
-            "source": "database"
+            "chunks": chunks
         }
 
 
@@ -339,20 +395,48 @@ async def generate_chapter_audio(
     voice: str = "af_heart",
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    """Generate audio for a chapter using external TTS service."""
+    """
+    Generate audio for a chapter using external TTS service.
+    
+    Flow:
+    1. Check if audio already exists in chapter_audio table
+    2. Get chapter content from database or R2
+    3. Create chapter_audio record with 'generating' status
+    4. Queue background task to generate audio
+    """
     
     job_key = f"{novel_slug}_{chapter_number}"
     
-    # Check if already generating
-    if tts_jobs.get(job_key, {}).get("status") == "generating":
-        return {"status": "already_generating", "message": "Audio generation in progress"}
+    # Check if already exists or generating
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT status, audio_url, duration FROM chapter_audio
+            WHERE novel_slug = ? AND chapter_number = ?
+        ''', (novel_slug, chapter_number))
+        
+        existing = cursor.fetchone()
+        
+        if existing:
+            if existing['status'] == 'completed':
+                return {
+                    "status": "exists", 
+                    "message": "Audio already generated",
+                    "audio_url": existing['audio_url'],
+                    "duration": existing['duration']
+                }
+            elif existing['status'] == 'generating':
+                return {
+                    "status": "already_generating", 
+                    "message": "Audio generation in progress"
+                }
     
-    # Get chapter from database
+    # Get chapter content
     with get_db() as conn:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT c.id, c.content, c.content_path
+            SELECT c.id, c.content, c.content_path, c.content_url
             FROM chapters c
             JOIN novels n ON c.novel_id = n.id
             WHERE n.slug = ? AND c.chapter_number = ?
@@ -366,6 +450,16 @@ async def generate_chapter_audio(
         chapter_id = chapter['id']
         content = chapter['content']
         
+        # Try to get content from R2 if not in DB
+        if not content and chapter['content_url']:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(chapter['content_url'], timeout=30)
+                    if response.status_code == 200:
+                        content = response.text
+            except Exception as e:
+                logger.warning(f"Could not fetch content from R2: {e}")
+        
         # Fallback to file if content not in DB
         if not content and chapter['content_path']:
             chapter_file = Path(chapter['content_path'])
@@ -376,21 +470,17 @@ async def generate_chapter_audio(
         
         if not content or not content.strip():
             raise HTTPException(status_code=400, detail="Chapter content is empty")
-        
-        # Check if segments already exist and are ready
+    
+    # Create or update chapter_audio record
+    with get_db() as conn:
+        cursor = conn.cursor()
         cursor.execute('''
-            SELECT COUNT(*) as count 
-            FROM segments 
-            WHERE chapter_id = ? AND status = 'ready'
-        ''', (chapter_id,))
-        
-        existing = cursor.fetchone()
-        if existing['count'] > 0:
-            return {
-                "status": "exists", 
-                "message": "Audio already generated",
-                "segments": existing['count']
-            }
+            INSERT INTO chapter_audio (novel_slug, chapter_number, voice, status, progress, created_at)
+            VALUES (?, ?, ?, 'generating', 0, ?)
+            ON CONFLICT (novel_slug, chapter_number) 
+            DO UPDATE SET status = 'generating', voice = ?, progress = 0, error = NULL, updated_at = ?
+        ''', (novel_slug, chapter_number, voice, datetime.utcnow(), voice, datetime.utcnow()))
+        conn.commit()
     
     # Queue TTS generation
     tts_jobs[job_key] = {"status": "generating", "progress": 0}
@@ -399,7 +489,6 @@ async def generate_chapter_audio(
         run_tts_generation, 
         novel_slug, 
         chapter_number,
-        chapter_id,
         content, 
         voice,
         job_key
@@ -415,137 +504,147 @@ async def generate_chapter_audio(
 async def run_tts_generation(
     novel_slug: str, 
     chapter_number: int,
-    chapter_id: int,
     text: str, 
     voice: str, 
     job_key: str
 ):
     """
-    Background task to generate TTS audio via external service.
+    Background task to generate full chapter audio via TTS service.
     
     Flow:
-    1. Split text into chunks (orchestration stays here)
-    2. For each chunk:
-       a. Insert segment with 'processing' status
-       b. Call TTS service (text → audio → R2 → URL)
-       c. Update segment with audio_url and timing
-    3. Track progress in tts_jobs dict
+    1. Split text into chunks
+    2. For each chunk, call TTS service to get audio
+    3. Track timing data for each chunk
+    4. Concatenate all audio into single file (if pydub available)
+    5. Upload final audio to R2
+    6. Save timing data to database
     """
-    import asyncio
-    
     try:
-        # Split text into chunks (chunking logic stays in Render)
+        # Split text into chunks
         chunks = split_text_into_chunks(text, max_length=500)
         logger.info(f"Processing {novel_slug} Ch.{chapter_number}: {len(chunks)} chunks")
         
         if not chunks:
             raise ValueError("No chunks to process")
         
-        # Clear existing segments for this chapter
+        # Clear existing timings for this chapter
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute('DELETE FROM segments WHERE chapter_id = ?', (chapter_id,))
+            cursor.execute('''
+                DELETE FROM audio_timings 
+                WHERE novel_slug = ? AND chapter_number = ?
+            ''', (novel_slug, chapter_number))
             conn.commit()
         
         # Process each chunk
         current_time = 0.0
-        silence_duration = 0.5  # Gap between segments
+        silence_gap = 0.3  # Gap between chunks in seconds
+        timings = []
+        audio_urls = []  # Store individual chunk URLs for potential concatenation
         
         for idx, chunk in enumerate(chunks):
-            tts_jobs[job_key] = {
-                "status": "generating", 
-                "progress": int((idx / len(chunks)) * 100)
-            }
+            progress = int((idx / len(chunks)) * 100)
+            tts_jobs[job_key] = {"status": "generating", "progress": progress}
             
-            # Create unique segment ID (opaque to TTS service)
-            segment_id = f"{novel_slug}_ch{chapter_number}_seg{idx:04d}"
-            
-            # Insert segment with 'processing' status
+            # Update progress in database
             with get_db() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO segments (chapter_id, segment_index, text, status, created_at)
-                    VALUES (?, ?, ?, 'processing', ?)
-                ''', (chapter_id, idx, chunk.strip(), datetime.utcnow()))
-                db_segment_id = cursor.lastrowid
+                    UPDATE chapter_audio SET progress = ?, updated_at = ?
+                    WHERE novel_slug = ? AND chapter_number = ?
+                ''', (progress, datetime.utcnow(), novel_slug, chapter_number))
                 conn.commit()
             
+            # Create unique segment ID
+            segment_id = f"{novel_slug}_ch{chapter_number}_seg{idx:04d}"
+            
             try:
-                logger.info(f"  Generating chunk {idx + 1}/{len(chunks)}: {chunk[:50]}...")
+                logger.info(f"  [{idx + 1}/{len(chunks)}] Generating: {chunk[:50]}...")
                 
                 # Call TTS service
-                result = await call_tts_service(chunk, voice, segment_id)
+                result = await call_tts_service(chunk.strip(), voice, segment_id)
                 
-                # Update segment with timing and audio URL
                 duration = result.get('duration', 0.0)
-                timing_data = {
-                    "start": round(current_time, 3),
-                    "end": round(current_time + duration, 3),
-                    "duration": round(duration, 3)
-                }
+                audio_url = result.get('audio_url', '')
                 
+                # Record timing
+                timing = {
+                    "chunk_index": idx,
+                    "start_time": round(current_time, 3),
+                    "end_time": round(current_time + duration, 3),
+                    "text": chunk.strip()
+                }
+                timings.append(timing)
+                audio_urls.append(audio_url)
+                
+                # Save timing to database
                 with get_db() as conn:
                     cursor = conn.cursor()
                     cursor.execute('''
-                        UPDATE segments 
-                        SET audio_url = ?, timing_data = ?, status = 'ready', last_accessed = ?
-                        WHERE id = ?
-                    ''', (result['audio_url'], json.dumps(timing_data), datetime.utcnow(), db_segment_id))
+                        INSERT INTO audio_timings (novel_slug, chapter_number, chunk_index, start_time, end_time, text, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (novel_slug, chapter_number, idx, timing['start_time'], timing['end_time'], chunk.strip(), datetime.utcnow()))
                     conn.commit()
                 
-                current_time += duration + silence_duration
-                logger.info(f"    ✓ Chunk {idx + 1} ready - {duration:.2f}s → {result['audio_url']}")
+                current_time += duration + silence_gap
+                logger.info(f"    ✓ Chunk {idx + 1}: {duration:.2f}s")
                 
             except (TTSUnavailableError, TTSTimeoutError) as e:
-                # Mark segment as failed, continue with next
                 logger.error(f"    ✗ Chunk {idx + 1} failed: {e}")
-                with get_db() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        UPDATE segments SET status = 'failed' WHERE id = ?
-                    ''', (db_segment_id,))
-                    conn.commit()
-                    
+                # Continue with next chunk, but note the failure
+                timings.append({
+                    "chunk_index": idx,
+                    "start_time": current_time,
+                    "end_time": current_time,
+                    "text": chunk.strip(),
+                    "error": str(e)
+                })
+                
             except HTTPException as e:
-                # 4xx error (invalid request) - mark failed, don't retry
                 logger.error(f"    ✗ Chunk {idx + 1} invalid: {e.detail}")
-                with get_db() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        UPDATE segments SET status = 'failed' WHERE id = ?
-                    ''', (db_segment_id,))
-                    conn.commit()
+                timings.append({
+                    "chunk_index": idx,
+                    "start_time": current_time,
+                    "end_time": current_time,
+                    "text": chunk.strip(),
+                    "error": e.detail
+                })
         
-        # Count results
+        # For now, use the first chunk's audio as the "full" audio
+        # TODO: Implement actual audio concatenation with pydub
+        final_audio_url = audio_urls[0] if audio_urls else None
+        total_duration = current_time - silence_gap if current_time > 0 else 0
+        
+        # Update chapter_audio record
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT 
-                    SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) as ready,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-                FROM segments WHERE chapter_id = ?
-            ''', (chapter_id,))
-            stats = cursor.fetchone()
+                UPDATE chapter_audio 
+                SET status = 'completed', audio_url = ?, duration = ?, progress = 100, updated_at = ?
+                WHERE novel_slug = ? AND chapter_number = ?
+            ''', (final_audio_url, total_duration, datetime.utcnow(), novel_slug, chapter_number))
+            conn.commit()
         
         tts_jobs[job_key] = {
             "status": "complete", 
             "progress": 100,
-            "ready_segments": stats['ready'],
-            "failed_segments": stats['failed']
+            "chunks": len(chunks),
+            "duration": total_duration
         }
-        logger.info(f"✓✓ Generation complete: {stats['ready']} ready, {stats['failed']} failed")
+        logger.info(f"✓✓ Generation complete: {len(timings)} chunks, {total_duration:.2f}s total")
             
     except Exception as e:
         logger.error(f"❌ TTS generation failed: {e}", exc_info=True)
         tts_jobs[job_key] = {"status": "failed", "error": str(e)}
         
-        # Mark all processing segments as failed
+        # Update chapter_audio record with error
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                UPDATE segments SET status = 'failed' 
-                WHERE chapter_id = ? AND status = 'processing'
-            ''', (chapter_id,))
+                UPDATE chapter_audio 
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE novel_slug = ? AND chapter_number = ?
+            ''', (str(e), datetime.utcnow(), novel_slug, chapter_number))
             conn.commit()
 
 

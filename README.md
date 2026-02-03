@@ -83,7 +83,7 @@ Visit **http://localhost:5173** to start reading!
 
 We are actively expanding NovelLabs. Here is what's coming next:
 
-- [ ] **Database Integration**: Migrate to SQLite/PostgreSQL for robust data handling.
+- [x] **Database Integration**: PostgreSQL on Render for robust data handling.
 - [ ] **Personalized Libraries**: View and follow other users' reading lists and libraries.
 - [ ] **Advanced TTS**: Integrate **Qwen3-TTS** for next-gen voice quality.
 - [ ] **Character Voice Mapping**: Auto-detect dialogue speakers and assign distinct voices.

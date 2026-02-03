@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 from logging.config import fileConfig
 
@@ -16,6 +17,13 @@ from src.api.models.models import Base
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# Override sqlalchemy.url with DATABASE_URL env var if present
+database_url = os.getenv("DATABASE_URL")
+if database_url:
+    # Render uses postgres:// but SQLAlchemy expects postgresql://
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
+    config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -49,7 +57,6 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        render_as_batch=True,  # Support SQLite ALTER TABLE operations
     )
 
     with context.begin_transaction():
@@ -73,7 +80,6 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            render_as_batch=True,  # Support SQLite ALTER TABLE operations
         )
 
         with context.begin_transaction():
