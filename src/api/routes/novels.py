@@ -1,5 +1,6 @@
 """  # pyright: ignore[reportImportCycles]
 Novels API routes
+FIXED: Removed auto-sync from list_novels to prevent DB overload
 """
 
 import os
@@ -95,14 +96,10 @@ async def list_novels(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0)
 ):
-    """Get all novels with optional filtering"""
-    try:
-        # Sync from filesystem first
-        sync_novels_to_db()
-    except Exception as e:
-        logger.error(f"Failed to sync novels to DB: {e}")
-        # Continue without sync - try to serve from DB anyway
+    """Get all novels with optional filtering
     
+    FIXED: No longer syncs on every request - use POST /api/novels/sync instead
+    """
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -191,9 +188,19 @@ async def create_novel(novel: NovelCreate):
 
 @router.post("/sync")
 async def sync_novels():
-    """Manually trigger syncing novels from filesystem to database"""
-    count = sync_novels_to_db()
-    return {"message": f"Synced {count} novels from filesystem"}
+    """Manually trigger syncing novels from filesystem to database
+    
+    IMPORTANT: This should be called:
+    - Once on application startup
+    - After new novels are scraped
+    - NOT on every GET request
+    """
+    try:
+        count = sync_novels_to_db()
+        return {"message": f"Synced {count} novels from filesystem", "count": count}
+    except Exception as e:
+        logger.error(f"Sync failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 
 @router.post("/{slug}/update")
@@ -292,4 +299,3 @@ async def update_novel(slug: str):
         "local_chapters": len(existing_chapters),
         "missing_chapters": missing_chapters[:20]  # Return first 20 for display
     }
-

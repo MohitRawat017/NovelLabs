@@ -1,3 +1,4 @@
+
 /**
  * API Service - handles all backend API calls
  */
@@ -108,6 +109,25 @@ export async function getVoices() {
     return fetchAPI('/audio/voices');
 }
 
+export async function getAudioStatus(slug, chapterNumber) {
+    return fetchAPI(`/audio/status/${slug}/${chapterNumber}`);
+}
+
+export async function generateChapterAudio(slug, chapterNumber, voice = 'af_heart') {
+    return fetchAPI(`/audio/generate/${slug}/${chapterNumber}?voice=${voice}`, {
+        method: 'POST',
+    });
+}
+
+export function getAudioStreamUrl(slug, chapterNumber) {
+    return `${API_BASE_URL}/audio/stream/${slug}/${chapterNumber}`;
+}
+
+export function getAudioTimingsUrl(slug, chapterNumber) {
+    return `${API_BASE_URL}/audio/timings/${slug}/${chapterNumber}`;
+}
+
+// Legacy function - keeping for backward compatibility
 export function getAudioUrl(slug, chapterNumber) {
     return `${API_BASE_URL}/audio/novel/${slug}/${chapterNumber}`;
 }

@@ -1,9 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Play, Pause, Volume2, VolumeX, X, Loader, ChevronUp, ChevronDown } from 'lucide-react';
+import { getAudioStatus, generateChapterAudio, getAudioStreamUrl } from '../../services/api';
 import './AudioPlayer.css';
-
-// Use environment variable for production, fallback to localhost for development
-const API_URL = import.meta.env.VITE_API_URL?.replace(/\/api$/, '') || 'http://localhost:8001';
 
 function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
     const audioRef = useRef(null);
@@ -38,15 +36,12 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         setError(null);
 
         try {
-            // Check if audio exists
-            const statusRes = await fetch(
-                `${API_URL}/api/audio/status/${novelSlug}/${chapterNumber}`
-            );
-            const status = await statusRes.json();
+            // Check if audio exists using centralized API
+            const status = await getAudioStatus(novelSlug, chapterNumber);
 
             if (status.exists) {
                 // Audio ready - load it
-                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                const url = getAudioStreamUrl(novelSlug, chapterNumber) + `?t=${Date.now()}`;
                 setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
@@ -62,7 +57,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             } else {
                 // Need to generate
                 setGenerationStatus('Starting TTS generation...');
-                await generateAudio();
+                await handleGenerateAudio();
             }
         } catch (err) {
             console.error('Audio check error:', err);
@@ -71,17 +66,13 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         }
     };
 
-    const generateAudio = async () => {
+    const handleGenerateAudio = async () => {
         try {
             const voice = settings?.voice || 'af_heart';
-            const res = await fetch(
-                `${API_URL}/api/audio/generate/${novelSlug}/${chapterNumber}?voice=${voice}`,
-                { method: 'POST' }
-            );
-            const data = await res.json();
+            const data = await generateChapterAudio(novelSlug, chapterNumber, voice);
 
             if (data.status === 'exists') {
-                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                const url = getAudioStreamUrl(novelSlug, chapterNumber) + `?t=${Date.now()}`;
                 setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
@@ -105,14 +96,11 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     const pollForCompletion = () => {
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(
-                    `${API_URL}/api/audio/status/${novelSlug}/${chapterNumber}`
-                );
-                const status = await res.json();
+                const status = await getAudioStatus(novelSlug, chapterNumber);
 
                 if (status.exists) {
                     clearInterval(interval);
-                    const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                    const url = getAudioStreamUrl(novelSlug, chapterNumber) + `?t=${Date.now()}`;
                     setAudioUrl(url);
                     setAudioReady(true);
                     setIsLoading(false);

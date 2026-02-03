@@ -1,13 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, Settings, Home, Loader, Headphones } from 'lucide-react';
-import { getChapterContent } from '../services/api';
+import { getChapterContent, getAudioTimingsUrl } from '../services/api';
 import SettingsModal, { getSettings } from '../components/ui/SettingsModal';
 import AudioPlayer from '../components/ui/AudioPlayer';
 import './ChapterReader.css';
-
-// Use environment variable for production, fallback to localhost for development
-const API_URL = import.meta.env.VITE_API_URL?.replace(/\/api$/, '') || 'http://localhost:8001';
 
 function ChapterReader() {
     const { slug, chapterId } = useParams();
@@ -48,7 +45,8 @@ function ChapterReader() {
     const fetchChunkTimings = async () => {
         try {
             console.log('Fetching timings for:', slug, chapterNum);
-            const res = await fetch(`${API_URL}/api/audio/timings/${slug}/${chapterNum}`);
+            const timingsUrl = getAudioTimingsUrl(slug, chapterNum);
+            const res = await fetch(timingsUrl);
             if (res.ok) {
                 const data = await res.json();
                 console.log('Timings loaded:', data);
