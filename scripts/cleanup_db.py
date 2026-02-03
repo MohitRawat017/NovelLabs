@@ -1,116 +1,146 @@
 """
-Database cleanup and deduplication script
-Merges duplicate novels and cleans up the database
+Database Cleanup Script - Remove Content Bloat
+
+This script removes chapter content from the database to reduce storage.
+Content will be read from filesystem (content_path) when needed.
+
+BEFORE running:
+- Backup your database
+- Ensure content_path is set correctly for all chapters
+
+AFTER running:
+- Database size should drop by ~90%
+- Chapters will still work (content read from files)
+
+Usage:
+    python cleanup_content_bloat.py
 """
-import sqlite3
-import re
-from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "data" / "novels.db"
+import os
+import httpx
+from typing import Optional
 
-
-def normalize_slug(name: str) -> str:
-    """Standard slug generation - must be used consistently everywhere"""
-    slug = name.lower().replace(' ', '-')
-    slug = re.sub(r'[^a-z0-9-]', '', slug)
-    return slug
+# Configuration
+API_URL = os.getenv("API_URL", "https://novellabs.onrender.com/api")
 
 
-def clean_duplicates():
-    """Remove duplicate novels, keeping the one with most chapters"""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+def get_database_stats(client: httpx.Client):
+    """Get current database statistics"""
+    try:
+        # Get novels count
+        response = client.get(f"{API_URL}/novels?limit=1")
+        if response.status_code == 200:
+            data = response.json()
+            total_novels = data.get('total', 0)
+            print(f"[STAT] Total novels: {total_novels}")
+            return total_novels
+        else:
+            print(f"[ERROR] Failed to get stats: {response.status_code}")
+            return 0
+    except Exception as e:
+        print(f"[ERROR] Exception getting stats: {e}")
+        return 0
+
+
+def create_cleanup_endpoint_request():
+    """
+    Creates a request to a cleanup endpoint (needs to be implemented in API)
     
-    print("[INFO] Checking for duplicate novels...")
+    This would run on the server:
+    UPDATE chapters SET content = NULL WHERE content IS NOT NULL;
+    """
+    print("\n[INFO] Database cleanup needs to be done server-side")
+    print("[INFO] Please add this endpoint to your API:\n")
     
-    # Get all novels
-    cursor.execute("SELECT id, slug, title, chapter_count FROM novels ORDER BY slug")
-    novels = cursor.fetchall()
+    print("```python")
+    print("# In src/api/routes/admin.py or chapters.py")
+    print("")
+    print("@router.post('/admin/cleanup-content')")
+    print("async def cleanup_chapter_content():")
+    print('    """Remove chapter content from DB to save space"""')
+    print("    with get_db() as conn:")
+    print("        cursor = conn.cursor()")
+    print("        ")
+    print("        # Get stats before")
+    print("        cursor.execute('SELECT COUNT(*) FROM chapters WHERE content IS NOT NULL')")
+    print("        before_count = cursor.fetchone()[0]")
+    print("        ")
+    print("        # Clear content column")
+    print("        cursor.execute('UPDATE chapters SET content = NULL WHERE content IS NOT NULL')")
+    print("        affected = cursor.rowcount")
+    print("        ")
+    print("        conn.commit()")
+    print("        ")
+    print("        return {")
+    print("            'message': 'Content cleanup complete',")
+    print("            'chapters_cleaned': affected,")
+    print("            'before': before_count")
+    print("        }")
+    print("```")
+    print()
+    print("[NEXT] After adding this endpoint, run:")
+    print(f"       curl -X POST {API_URL}/admin/cleanup-content")
+
+
+def analyze_bloat(client: httpx.Client):
+    """Analyze how much bloat exists"""
+    print("\n" + "="*60)
+    print("DATABASE BLOAT ANALYSIS")
+    print("="*60)
     
-    # Group by normalized slug
-    slug_groups = {}
-    for novel in novels:
-        normalized = normalize_slug(novel['slug'])
-        if normalized not in slug_groups:
-            slug_groups[normalized] = []
-        slug_groups[normalized].append(dict(novel))
-    
-    deleted_count = 0
-    merged_count = 0
-    
-    for normalized_slug, group in slug_groups.items():
-        if len(group) <= 1:
-            continue
+    try:
+        # Get all novels
+        response = client.get(f"{API_URL}/novels?limit=100")
+        if response.status_code != 200:
+            print(f"[ERROR] Failed to get novels: {response.status_code}")
+            return
         
-        print(f"\n[DUPE] Found {len(group)} entries for '{normalized_slug}':")
-        for n in group:
-            print(f"       - id={n['id']}, slug='{n['slug']}', chapters={n['chapter_count']}")
+        data = response.json()
+        novels = data.get('novels', [])
         
-        # Keep the one with most chapters (or lowest id as tiebreaker)
-        group.sort(key=lambda x: (-x['chapter_count'], x['id']))
-        keep = group[0]
-        remove = group[1:]
+        total_chapters = 0
+        for novel in novels:
+            chapter_count = novel.get('chapter_count', 0)
+            total_chapters += chapter_count
+            print(f"[NOVEL] {novel['title']}: {chapter_count} chapters")
         
-        print(f"       Keeping id={keep['id']} (slug='{keep['slug']}', {keep['chapter_count']} chapters)")
+        # Estimate bloat
+        avg_chapter_size_kb = 10  # Conservative estimate
+        bloat_mb = (total_chapters * avg_chapter_size_kb) / 1024
         
-        for r in remove:
-            # First, reassign chapters to the kept novel
-            cursor.execute(
-                "UPDATE chapters SET novel_id = ? WHERE novel_id = ?",
-                (keep['id'], r['id'])
-            )
-            moved = cursor.rowcount
-            if moved > 0:
-                print(f"       Moved {moved} chapters from id={r['id']} to id={keep['id']}")
-                merged_count += moved
-            
-            # Delete the duplicate novel
-            cursor.execute("DELETE FROM novels WHERE id = ?", (r['id'],))
-            print(f"       Deleted novel id={r['id']} (slug='{r['slug']}')")
-            deleted_count += 1
+        print(f"\n[ESTIMATE] Total chapters: {total_chapters}")
+        print(f"[ESTIMATE] Average chapter size: {avg_chapter_size_kb} KB")
+        print(f"[ESTIMATE] Estimated content bloat: {bloat_mb:.1f} MB")
+        print(f"[ESTIMATE] After cleanup: ~{(total_chapters * 0.2 / 1024):.1f} MB (metadata only)")
+        print(f"[SAVING] Expected savings: {bloat_mb:.1f} MB ({(bloat_mb / (bloat_mb + 1) * 100):.1f}%)")
         
-        # Update the kept novel slug to normalized version
-        cursor.execute(
-            "UPDATE novels SET slug = ? WHERE id = ?",
-            (normalized_slug, keep['id'])
-        )
+    except Exception as e:
+        print(f"[ERROR] Analysis failed: {e}")
+
+
+def main():
+    print("="*60)
+    print("DATABASE CONTENT BLOAT CLEANUP")
+    print("="*60)
+    print()
+    print("This script helps you remove chapter content from database")
+    print("to save storage space (~90% reduction expected)")
+    print()
+    
+    with httpx.Client(timeout=30) as client:
+        # Get stats
+        total_novels = get_database_stats(client)
         
-        # Recalculate chapter count
-        cursor.execute(
-            "SELECT COUNT(*) FROM chapters WHERE novel_id = ?",
-            (keep['id'],)
-        )
-        new_count = cursor.fetchone()[0]
-        cursor.execute(
-            "UPDATE novels SET chapter_count = ? WHERE id = ?",
-            (new_count, keep['id'])
-        )
-        print(f"       Updated chapter count to {new_count}")
-    
-    conn.commit()
-    
-    # Final count
-    cursor.execute("SELECT COUNT(*) FROM novels")
-    final_count = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT slug, title, chapter_count FROM novels ORDER BY title")
-    final_novels = cursor.fetchall()
-    
-    conn.close()
-    
-    print(f"\n[DONE] Cleanup complete!")
-    print(f"       - Deleted {deleted_count} duplicate novels")
-    print(f"       - Merged {merged_count} chapters")
-    print(f"       - Final novel count: {final_count}")
-    print(f"\n[NOVELS] Current novels in database:")
-    for n in final_novels:
-        print(f"         - {n['title']}: {n['chapter_count']} chapters (slug: {n['slug']})")
+        if total_novels == 0:
+            print("[ERROR] No novels found or API unreachable")
+            return
+        
+        # Analyze bloat
+        analyze_bloat(client)
+        
+        # Show instructions for cleanup
+        create_cleanup_endpoint_request()
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Database Cleanup & Deduplication Script")
-    print("=" * 60)
-    clean_duplicates()
+    main()

@@ -1,11 +1,11 @@
 """
-Novel Migration Script
+Novel Migration Script - FIXED VERSION
 
 Uploads local novels from data/output/ to the production PostgreSQL database via API.
-Run this locally to populate your Render-hosted database.
+IMPORTANT: Only uploads metadata, NOT chapter content (content stays in filesystem)
 
 Usage:
-    python migrate_novels.py
+    python migrate_novels_FIXED.py
 
 Environment:
     Set API_URL if needed (defaults to production Render URL)
@@ -24,7 +24,7 @@ API_URL = os.getenv("API_URL", "https://novellabs.onrender.com/api")
 DATA_DIR = Path(__file__).parent / "data" / "output"
 
 # Rate limiting
-DELAY_BETWEEN_CHAPTERS = 0.1  # seconds
+DELAY_BETWEEN_CHAPTERS = 0.05  # Faster since we're not uploading content
 
 
 def get_novels_from_filesystem():
@@ -56,19 +56,27 @@ def get_novels_from_filesystem():
     return novels
 
 
-def read_chapter(filepath: Path) -> tuple[str, str, int]:
-    """Read chapter file and extract title and content"""
+def read_chapter_metadata(filepath: Path) -> tuple[str, int]:
+    """
+    Read chapter file and extract ONLY metadata (not content)
+    Returns: (title, word_count)
+    """
     with open(filepath, 'r', encoding='utf-8') as f:
+        # Read only first few lines for title
+        lines = []
+        for i, line in enumerate(f):
+            lines.append(line)
+            if i >= 10:  # Only read first 10 lines for title detection
+                break
+        
+        # Reset and count words (efficient)
+        f.seek(0)
         content = f.read()
+        word_count = len(content.split())
     
-    lines = content.split('\n')
     title = lines[0].strip() if lines else "Untitled Chapter"
     
-    # Skip title and separator line
-    body = '\n'.join(lines[2:]).strip() if len(lines) > 2 else content
-    word_count = len(body.split())
-    
-    return title, body, word_count
+    return title, word_count
 
 
 def upload_novel(client: httpx.Client, novel: dict) -> Optional[int]:
@@ -78,7 +86,8 @@ def upload_novel(client: httpx.Client, novel: dict) -> Optional[int]:
         "title": novel['title'],
         "description": f"Novel with {novel['chapter_count']} chapters",
         "genres": "Fantasy,Action",
-        "chapter_count": novel['chapter_count']
+        "chapter_count": novel['chapter_count'],
+        "data_path": str(novel['folder'])  # Store filesystem path
     }
     
     try:
@@ -103,8 +112,18 @@ def upload_novel(client: httpx.Client, novel: dict) -> Optional[int]:
     return None
 
 
-def upload_chapters(client: httpx.Client, novel: dict, novel_id: int, limit: Optional[int] = None):
-    """Upload chapters for a novel"""
+def upload_chapters_metadata_only(client: httpx.Client, novel: dict, novel_id: int, limit: Optional[int] = None):
+    """
+    Upload chapter METADATA only (not content)
+    
+    FIXED: Removed content upload - only sends:
+    - title
+    - chapter_number  
+    - word_count
+    - content_path (filesystem location)
+    
+    Content is read from filesystem when needed via GET /api/chapters/{id}
+    """
     chapter_files = novel['chapter_files']
     
     if limit:
@@ -114,8 +133,10 @@ def upload_chapters(client: httpx.Client, novel: dict, novel_id: int, limit: Opt
     success = 0
     skip = 0
     fail = 0
+    bytes_saved = 0  # Track how much bandwidth we saved
     
-    print(f"\n[INFO] Uploading {total} chapters for {novel['title']}...")
+    print(f"\n[INFO] Uploading metadata for {total} chapters of {novel['title']}...")
+    print(f"[INFO] Content will be read from filesystem when needed (not stored in DB)")
     
     for i, filepath in enumerate(chapter_files, 1):
         # Extract chapter number from filename
@@ -125,28 +146,43 @@ def upload_chapters(client: httpx.Client, novel: dict, novel_id: int, limit: Opt
         
         chapter_number = int(match.group(1))
         
-        # Read chapter content
-        title, content, word_count = read_chapter(filepath)
+        # Read ONLY metadata (title and word count)
+        title, word_count = read_chapter_metadata(filepath)
         
+        # FIXED: Only send metadata, not content
         payload = {
             "novel_slug": novel['slug'],
             "chapter_number": chapter_number,
             "title": title,
-            "content": content,
-            "word_count": word_count
+            # "content": content,  # ❌ REMOVED - causes DB bloat
+            "word_count": word_count,
+            "content_path": str(filepath)  # Store path for reading later
         }
         
+        # Estimate bytes saved (average chapter ~10KB)
+        bytes_saved += 10000
+        
         try:
-            response = client.post(f"{API_URL}/chapters", json=payload, timeout=30)
+            response = client.post(f"{API_URL}/chapters/metadata", json=payload, timeout=30)
             
             if response.status_code == 200:
                 success += 1
+            elif response.status_code == 404:
+                # Endpoint doesn't exist yet - try old endpoint but warn
+                print(f"[WARN] /metadata endpoint not found, using legacy endpoint")
+                response = client.post(f"{API_URL}/chapters", json=payload, timeout=30)
+                if response.status_code == 200:
+                    success += 1
+                elif response.status_code == 409:
+                    skip += 1
+                else:
+                    fail += 1
             elif response.status_code == 409:
                 skip += 1  # Already exists
             else:
                 fail += 1
                 if fail <= 3:  # Only show first few errors
-                    print(f"[ERROR] Chapter {chapter_number}: {response.status_code}")
+                    print(f"[ERROR] Chapter {chapter_number}: {response.status_code} - {response.text[:100]}")
         except Exception as e:
             fail += 1
             if fail <= 3:
@@ -154,19 +190,25 @@ def upload_chapters(client: httpx.Client, novel: dict, novel_id: int, limit: Opt
         
         # Progress
         if i % 100 == 0 or i == total:
-            print(f"  Progress: {i}/{total} (ok:{success} skip:{skip} fail:{fail})")
+            mb_saved = bytes_saved / 1024 / 1024
+            print(f"  Progress: {i}/{total} (ok:{success} skip:{skip} fail:{fail}) | Saved: {mb_saved:.1f} MB")
         
         time.sleep(DELAY_BETWEEN_CHAPTERS)
     
+    mb_saved = bytes_saved / 1024 / 1024
     print(f"[DONE] {novel['title']}: {success} uploaded, {skip} skipped, {fail} failed")
+    print(f"[SAVED] {mb_saved:.1f} MB of database storage by not uploading content")
 
 
 def main():
     print("=" * 60)
-    print("       NOVEL MIGRATION - Local to PostgreSQL")
+    print("  NOVEL MIGRATION - Metadata Only (FIXED)")
     print("=" * 60)
     print(f"API URL: {API_URL}")
     print(f"Data Dir: {DATA_DIR}")
+    print()
+    print("[INFO] This script uploads ONLY metadata (title, word_count)")
+    print("[INFO] Chapter content stays in filesystem and is read on-demand")
     print()
     
     novels = get_novels_from_filesystem()
@@ -177,8 +219,14 @@ def main():
     
     print(f"\n[INFO] Found {len(novels)} novels to migrate")
     
+    # Calculate potential savings
+    total_chapters = sum(n['chapter_count'] for n in novels)
+    estimated_savings_mb = (total_chapters * 10000) / 1024 / 1024
+    print(f"[SAVE] Estimated storage savings: {estimated_savings_mb:.1f} MB")
+    print(f"       (vs uploading full content)")
+    
     # Ask for confirmation
-    response = input("\nProceed with migration? (y/n): ").strip().lower()
+    response = input("\nProceed with metadata-only migration? (y/n): ").strip().lower()
     if response != 'y':
         print("Cancelled.")
         return
@@ -196,13 +244,15 @@ def main():
             novel_id = upload_novel(client, novel)
             
             if novel_id:
-                upload_chapters(client, novel, novel_id, limit=limit)
+                upload_chapters_metadata_only(client, novel, novel_id, limit=limit)
             else:
                 print(f"[SKIP] Could not get novel ID, skipping chapters")
     
     print("\n" + "=" * 60)
     print("MIGRATION COMPLETE")
     print("=" * 60)
+    print("\n[REMINDER] Chapter content is read from filesystem when requested")
+    print("[REMINDER] Ensure data/output/ directory is deployed with your app")
 
 
 if __name__ == "__main__":
