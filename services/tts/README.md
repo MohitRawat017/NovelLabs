@@ -60,11 +60,11 @@ uvicorn app:app --reload --port 8002
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `USE_GPU` | `true` | Toggle GPU/CPU inference |
-| `R2_ACCOUNT_ID` | - | Cloudflare account ID |
-| `R2_ACCESS_KEY_ID` | - | R2 API key ID |
-| `R2_SECRET_ACCESS_KEY` | - | R2 API secret |
-| `R2_BUCKET_NAME` | `novellabs-audio` | R2 bucket name |
-| `R2_PUBLIC_URL` | - | Custom domain (optional) |
+| `R2_AUDIO_ACCOUNT_ID` | - | Cloudflare account ID |
+| `R2_AUDIO_ACCESS_KEY_ID` | - | R2 API key ID |
+| `R2_AUDIO_SECRET_ACCESS_KEY` | - | R2 API secret |
+| `R2_AUDIO_BUCKET_NAME` | `novellabs-audio` | R2 bucket name |
+| `R2_AUDIO_PUBLIC_URL` | - | Custom domain (optional) |
 
 ## Lightning AI Deployment
 

@@ -213,12 +213,19 @@ def init_db():
                     title TEXT,
                     content TEXT,
                     content_path TEXT,
+                    content_url TEXT,
                     audio_path TEXT,
                     word_count INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(novel_id, chapter_number)
                 )
             ''')
+            
+            # Add content_url column if it doesn't exist (migration for existing DBs)
+            try:
+                cursor.execute('ALTER TABLE chapters ADD COLUMN IF NOT EXISTS content_url TEXT')
+            except Exception:
+                pass  # Column might already exist
             
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS audio_segments (
@@ -282,6 +289,7 @@ def init_db():
                     title TEXT,
                     content TEXT,
                     content_path TEXT,
+                    content_url TEXT,
                     audio_path TEXT,
                     word_count INTEGER DEFAULT 0,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

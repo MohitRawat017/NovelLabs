@@ -5,6 +5,8 @@ Prevents content bloat by not storing chapter content in database
 
 import os
 import re
+import logging
+import httpx
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
@@ -14,6 +16,7 @@ from ..database import get_db, dict_from_row, list_from_rows
 from ..models.schemas import ChapterResponse, ChapterListResponse, ChapterContentResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Base directory
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
@@ -100,6 +103,44 @@ class ChapterMetadataCreate(BaseModel):
     title: str = "Untitled Chapter"
     content_path: str  # Required - where to find content on filesystem
     word_count: int = 0
+
+
+class ContentUrlUpdate(BaseModel):
+    """Schema for updating chapter content URL (R2)"""
+    content_url: str
+
+
+@router.patch("/novel/{slug}/{chapter_number}/content-url")
+async def update_chapter_content_url(slug: str, chapter_number: int, data: ContentUrlUpdate):
+    """
+    Update chapter with R2 content URL
+    
+    Use this after uploading chapter content to Cloudflare R2.
+    The API will then fetch content from R2 instead of local filesystem.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Get novel
+        cursor.execute('SELECT id FROM novels WHERE slug = ?', (slug,))
+        novel = cursor.fetchone()
+        
+        if not novel:
+            raise HTTPException(status_code=404, detail="Novel not found")
+        
+        # Update chapter
+        cursor.execute('''
+            UPDATE chapters 
+            SET content_url = ?
+            WHERE novel_id = ? AND chapter_number = ?
+        ''', (data.content_url, novel['id'], chapter_number))
+        
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Chapter not found")
+        
+        conn.commit()
+    
+    return {"message": "Content URL updated", "content_url": data.content_url}
 
 
 @router.post("/metadata")
@@ -353,16 +394,30 @@ async def get_chapter_by_number(slug: str, chapter_number: int):
         if not chapter:
             raise HTTPException(status_code=404, detail="Chapter not found")
         
-        # FIXED: Read content from filesystem (preferred) or DB (legacy)
+        # Read content in order of preference:
+        # 1. R2 URL (content_url) - best for production
+        # 2. Local filesystem (content_path) - for dev
+        # 3. Database (content) - legacy fallback
         content = ""
         
-        if chapter.get('content_path') and os.path.exists(chapter['content_path']):
+        if chapter.get('content_url'):
+            # Fetch from R2
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(chapter['content_url'], timeout=10)
+                    if resp.status_code == 200:
+                        content = resp.text
+            except Exception as e:
+                logger.warning(f"Failed to fetch from R2: {e}")
+        
+        if not content and chapter.get('content_path') and os.path.exists(chapter['content_path']):
             with open(chapter['content_path'], 'r', encoding='utf-8') as f:
                 content = f.read()
                 lines = content.split('\n')
                 if len(lines) > 2:
                     content = '\n'.join(lines[2:]).strip()
-        elif chapter.get('content'):
+        
+        if not content and chapter.get('content'):
             content = chapter['content']
         
         # Get prev/next

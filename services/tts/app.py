@@ -11,7 +11,7 @@ This service:
 
 Environment Variables:
 - USE_GPU: Toggle GPU/CPU acceleration (default: true)
-- R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+- R2_AUDIO_ACCOUNT_ID, R2_AUDIO_ACCESS_KEY_ID, R2_AUDIO_SECRET_ACCESS_KEY, R2_AUDIO_BUCKET_NAME
 """
 
 import os

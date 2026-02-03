@@ -5,11 +5,11 @@ Uploads audio files to Cloudflare R2 and returns public URLs.
 R2 is S3-compatible, so we use boto3.
 
 Environment Variables Required:
-- R2_ACCOUNT_ID
-- R2_ACCESS_KEY_ID
-- R2_SECRET_ACCESS_KEY
-- R2_BUCKET_NAME
-- R2_PUBLIC_URL (optional, for custom domain)
+- R2_AUDIO_ACCOUNT_ID
+- R2_AUDIO_ACCESS_KEY_ID
+- R2_AUDIO_SECRET_ACCESS_KEY
+- R2_AUDIO_BUCKET_NAME
+- R2_AUDIO_PUBLIC_URL (optional, for custom domain)
 """
 
 import os
@@ -23,14 +23,14 @@ logger = logging.getLogger(__name__)
 
 # ==================== Configuration ====================
 
-R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
-R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
-R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "novellabs-audio")
-R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL", "")  # e.g., https://audio.novellabs.com
+R2_AUDIO_ACCOUNT_ID = os.getenv("R2_AUDIO_ACCOUNT_ID", "")
+R2_AUDIO_ACCESS_KEY_ID = os.getenv("R2_AUDIO_ACCESS_KEY_ID", "")
+R2_AUDIO_SECRET_ACCESS_KEY = os.getenv("R2_AUDIO_SECRET_ACCESS_KEY", "")
+R2_AUDIO_BUCKET_NAME = os.getenv("R2_AUDIO_BUCKET_NAME", "novellabs-audio")
+R2_AUDIO_PUBLIC_URL = os.getenv("R2_AUDIO_PUBLIC_URL", "")  # e.g., https://audio.novellabs.com
 
 # R2 endpoint format
-R2_ENDPOINT = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else ""
+R2_ENDPOINT = f"https://{R2_AUDIO_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_AUDIO_ACCOUNT_ID else ""
 
 # ==================== S3 Client ====================
 
@@ -44,22 +44,22 @@ def get_s3_client():
     if _s3_client is not None:
         return _s3_client
     
-    if not all([R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY]):
-        logger.warning("R2 credentials not configured. Using mock upload.")
+    if not all([R2_AUDIO_ACCOUNT_ID, R2_AUDIO_ACCESS_KEY_ID, R2_AUDIO_SECRET_ACCESS_KEY]):
+        logger.warning("R2 Audio credentials not configured. Using mock upload.")
         return None
     
     _s3_client = boto3.client(
         's3',
         endpoint_url=R2_ENDPOINT,
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        aws_access_key_id=R2_AUDIO_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_AUDIO_SECRET_ACCESS_KEY,
         config=Config(
             signature_version='s3v4',
             retries={'max_attempts': 2, 'mode': 'standard'}
         )
     )
     
-    logger.info(f"R2 client initialized for bucket: {R2_BUCKET_NAME}")
+    logger.info(f"R2 Audio client initialized for bucket: {R2_AUDIO_BUCKET_NAME}")
     return _s3_client
 
 
@@ -92,7 +92,7 @@ def upload_audio_to_r2(
     
     try:
         client.put_object(
-            Bucket=R2_BUCKET_NAME,
+            Bucket=R2_AUDIO_BUCKET_NAME,
             Key=key,
             Body=audio_bytes,
             ContentType=content_type,
@@ -100,12 +100,12 @@ def upload_audio_to_r2(
         )
         
         # Build public URL
-        if R2_PUBLIC_URL:
+        if R2_AUDIO_PUBLIC_URL:
             # Custom domain (recommended for production)
-            url = f"{R2_PUBLIC_URL.rstrip('/')}/{key}"
+            url = f"{R2_AUDIO_PUBLIC_URL.rstrip('/')}/{key}"
         else:
             # Default R2 public URL format
-            url = f"https://{R2_BUCKET_NAME}.{R2_ACCOUNT_ID}.r2.dev/{key}"
+            url = f"https://{R2_AUDIO_BUCKET_NAME}.{R2_AUDIO_ACCOUNT_ID}.r2.dev/{key}"
         
         logger.info(f"✓ Uploaded to R2: {key}")
         return url
@@ -134,7 +134,7 @@ def delete_audio_from_r2(filename: str) -> bool:
     key = f"audio/{filename}"
     
     try:
-        client.delete_object(Bucket=R2_BUCKET_NAME, Key=key)
+        client.delete_object(Bucket=R2_AUDIO_BUCKET_NAME, Key=key)
         logger.info(f"✓ Deleted from R2: {key}")
         return True
     except Exception as e:
