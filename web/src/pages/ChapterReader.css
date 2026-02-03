@@ -188,3 +188,44 @@ html {
 .reader.audio-active {
     scroll-behavior: smooth;
 }
+
+/* Add these styles to your ChapterReader.css file */
+
+/* Distinguish between paragraph chunks and segments */
+.chunk-paragraph {
+    margin-bottom: 1em;
+}
+
+.chunk-segment {
+    margin-bottom: 0.5em;
+}
+
+/* Make sure active chunk stands out during audio playback */
+.chunk-active {
+    background: linear-gradient(90deg, 
+        rgba(59, 130, 246, 0.1) 0%, 
+        rgba(59, 130, 246, 0.05) 100%
+    );
+    border-left: 3px solid rgb(59, 130, 246);
+    padding-left: 1rem;
+    margin-left: -1rem;
+    transition: all 0.3s ease;
+    border-radius: 4px;
+}
+
+/* Optional: Add subtle visual indicator for segment continuations */
+.chunk-segment:not(:first-child)::before {
+    content: '';
+    display: inline-block;
+    width: 4px;
+    height: 4px;
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+}
+
+/* Ensure smooth transitions */
+.chunk {
+    transition: background 0.3s ease, border 0.3s ease;
+}

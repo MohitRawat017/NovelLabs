@@ -3,6 +3,8 @@ import { Play, Pause, Volume2, VolumeX, X, Loader, ChevronUp, ChevronDown } from
 import { getAudioStatus, generateChapterAudio, getAudioStreamUrl } from '../../services/api';
 import './AudioPlayer.css';
 
+const API_URL = 'http://localhost:8001';
+
 function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
     const audioRef = useRef(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -36,12 +38,15 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         setError(null);
 
         try {
-            // Check if audio exists using centralized API
-            const status = await getAudioStatus(novelSlug, chapterNumber);
+            // Check if audio exists
+            const statusRes = await fetch(
+                `${API_URL}/api/audio/status/${novelSlug}/${chapterNumber}`
+            );
+            const status = await statusRes.json();
 
             if (status.exists) {
                 // Audio ready - load it
-                const url = getAudioStreamUrl(novelSlug, chapterNumber) + `?t=${Date.now()}`;
+                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
                 setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
@@ -69,10 +74,14 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     const handleGenerateAudio = async () => {
         try {
             const voice = settings?.voice || 'af_heart';
-            const data = await generateChapterAudio(novelSlug, chapterNumber, voice);
+            const res = await fetch(
+                `${API_URL}/api/audio/generate/${novelSlug}/${chapterNumber}?voice=${voice}`,
+                { method: 'POST' }
+            );
+            const data = await res.json();
 
             if (data.status === 'exists') {
-                const url = getAudioStreamUrl(novelSlug, chapterNumber) + `?t=${Date.now()}`;
+                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
                 setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
@@ -96,11 +105,14 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     const pollForCompletion = () => {
         const interval = setInterval(async () => {
             try {
-                const status = await getAudioStatus(novelSlug, chapterNumber);
+                const res = await fetch(
+                    `${API_URL}/api/audio/status/${novelSlug}/${chapterNumber}`
+                );
+                const status = await res.json();
 
                 if (status.exists) {
                     clearInterval(interval);
-                    const url = getAudioStreamUrl(novelSlug, chapterNumber) + `?t=${Date.now()}`;
+                    const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
                     setAudioUrl(url);
                     setAudioReady(true);
                     setIsLoading(false);

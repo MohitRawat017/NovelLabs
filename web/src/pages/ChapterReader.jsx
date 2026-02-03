@@ -104,33 +104,8 @@ function ChapterReader() {
         navigate(`/novel/${slug}/chapter/${num}`);
     };
 
-    if (loading) {
-        return (
-            <div className="reader">
-                <div className="loading-state">
-                    <Loader size={32} className="spin" />
-                    <p>Loading chapter...</p>
-                </div>
-            </div>
-        );
-    }
-
-    if (error) {
-        return (
-            <div className="reader">
-                <div className="error-state">
-                    <h2>Error loading chapter</h2>
-                    <p>{error}</p>
-                    <Link to={`/novel/${slug}`} className="btn btn-primary">Back to Novel</Link>
-                </div>
-            </div>
-        );
-    }
-
-    if (!chapter) return null;
-
-    // Smart text segmenter - splits text into readable chunks (similar to backend segmenter)
-    const segmentText = (text, maxChars = 250, minChars = 120) => {
+    // Improved smart text segmenter - splits text into readable chunks
+    const segmentText = (text, targetChars = 300, minChars = 150, maxChars = 450) => {
         const paragraphs = text.split(/\n+/).filter(p => p.trim());
         const chunks = [];
 
@@ -138,37 +113,78 @@ function ChapterReader() {
             const trimmed = paragraph.trim();
             if (!trimmed) continue;
 
-            // If paragraph is short enough, add it as a single chunk
+            // If paragraph is within limits, keep it as one chunk
             if (trimmed.length <= maxChars) {
-                chunks.push(trimmed);
+                chunks.push({
+                    text: trimmed,
+                    type: 'paragraph'
+                });
                 continue;
             }
 
             // Split long paragraphs by sentences
-            const sentences = trimmed.match(/[^.!?]+[.!?]+/g) || [trimmed];
+            // Improved regex that handles periods, exclamations, questions, and ellipsis
+            const sentenceRegex = /([^.!?]+[.!?]+(?:\s+|$))|([^.!?]+$)/g;
+            const sentenceMatches = [...trimmed.matchAll(sentenceRegex)];
+            const sentences = sentenceMatches.map(m => (m[1] || m[2] || '').trim()).filter(s => s);
+
+            if (sentences.length === 0) {
+                chunks.push({ text: trimmed, type: 'paragraph' });
+                continue;
+            }
+
             let currentChunk = '';
 
-            for (const sentence of sentences) {
-                const sentenceTrimmed = sentence.trim();
-                if (!sentenceTrimmed) continue;
+            for (let i = 0; i < sentences.length; i++) {
+                const sentence = sentences[i];
+                const nextSentence = sentences[i + 1];
+                
+                // Calculate what the chunk would be if we add this sentence
+                const wouldBe = currentChunk ? currentChunk + ' ' + sentence : sentence;
 
-                // If adding this sentence would exceed maxChars, save current chunk and start new one
-                if (currentChunk && (currentChunk.length + sentenceTrimmed.length + 1) > maxChars) {
-                    if (currentChunk.length >= minChars) {
-                        chunks.push(currentChunk);
-                        currentChunk = sentenceTrimmed;
-                    } else {
-                        // Current chunk is too small, add sentence anyway
-                        currentChunk += ' ' + sentenceTrimmed;
+                // Decision logic:
+                // 1. If we have no chunk yet, start with this sentence
+                if (!currentChunk) {
+                    currentChunk = sentence;
+                    continue;
+                }
+
+                // 2. If adding this sentence keeps us under maxChars, add it
+                if (wouldBe.length <= maxChars) {
+                    currentChunk = wouldBe;
+                    
+                    // If we're approaching target size and this is a good stopping point, cut here
+                    if (currentChunk.length >= targetChars && (!nextSentence || currentChunk.length + nextSentence.length > maxChars)) {
+                        chunks.push({ text: currentChunk, type: 'segment' });
+                        currentChunk = '';
                     }
+                    continue;
+                }
+
+                // 3. Adding would exceed maxChars
+                if (currentChunk.length >= minChars) {
+                    // Current chunk is good size, save it and start new chunk
+                    chunks.push({ text: currentChunk, type: 'segment' });
+                    currentChunk = sentence;
                 } else {
-                    currentChunk = currentChunk ? currentChunk + ' ' + sentenceTrimmed : sentenceTrimmed;
+                    // Current chunk is too small, but adding sentence would exceed max
+                    // Choose based on which is closer to target
+                    const currentDistance = Math.abs(targetChars - currentChunk.length);
+                    const wouldBeDistance = Math.abs(targetChars - wouldBe.length);
+                    
+                    if (wouldBeDistance < currentDistance || wouldBe.length <= maxChars * 1.1) {
+                        // Adding sentence gets us closer to target (with 10% tolerance)
+                        currentChunk = wouldBe;
+                    }
+                    
+                    chunks.push({ text: currentChunk, type: 'segment' });
+                    currentChunk = wouldBe === currentChunk ? '' : sentence;
                 }
             }
 
             // Don't forget the last chunk
             if (currentChunk) {
-                chunks.push(currentChunk);
+                chunks.push({ text: currentChunk, type: 'segment' });
             }
         }
 
@@ -197,10 +213,47 @@ function ChapterReader() {
 
         // Default: show smartly segmented paragraphs for better readability
         const segments = segmentText(chapter.content);
-        return segments.map((segment, idx) => (
-            <p key={idx} className="chunk">{segment}</p>
-        ));
+        return segments.map((segment, idx) => {
+            const isNewParagraph = segment.type === 'paragraph';
+            const prevSegment = idx > 0 ? segments[idx - 1] : null;
+            const shouldAddBreak = prevSegment && prevSegment.type === 'segment' && isNewParagraph;
+            
+            return (
+                <p 
+                    key={idx} 
+                    className={`chunk ${isNewParagraph ? 'chunk-paragraph' : 'chunk-segment'}`}
+                    style={shouldAddBreak ? { marginTop: '1.5em' } : undefined}
+                >
+                    {segment.text}
+                </p>
+            );
+        });
     };
+
+    if (loading) {
+        return (
+            <div className="reader">
+                <div className="loading-state">
+                    <Loader size={32} className="spin" />
+                    <p>Loading chapter...</p>
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="reader">
+                <div className="error-state">
+                    <h2>Error loading chapter</h2>
+                    <p>{error}</p>
+                    <Link to={`/novel/${slug}`} className="btn btn-primary">Back to Novel</Link>
+                </div>
+            </div>
+        );
+    }
+
+    if (!chapter) return null;
 
     return (
         <div className="reader">
