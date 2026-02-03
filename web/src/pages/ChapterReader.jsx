@@ -6,7 +6,8 @@ import SettingsModal, { getSettings } from '../components/ui/SettingsModal';
 import AudioPlayer from '../components/ui/AudioPlayer';
 import './ChapterReader.css';
 
-const API_URL = 'http://localhost:8001';
+// Use environment variable for production, fallback to localhost for development
+const API_URL = import.meta.env.VITE_API_URL?.replace(/\/api$/, '') || 'http://localhost:8001';
 
 function ChapterReader() {
     const { slug, chapterId } = useParams();
