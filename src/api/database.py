@@ -18,11 +18,14 @@ logger = logging.getLogger(__name__)
 _parsed_url = urlparse(DATABASE_URL)
 IS_POSTGRES = _parsed_url.scheme in ('postgresql', 'postgres')
 
+logger.info(f"Database URL scheme: {_parsed_url.scheme}")
+logger.info(f"Using PostgreSQL: {IS_POSTGRES}")
+
 # Import appropriate database library
 if IS_POSTGRES:
     import psycopg2
     import psycopg2.extras
-    logger.info("Using PostgreSQL database")
+    logger.info("PostgreSQL driver loaded successfully")
 else:
     import sqlite3
     logger.info("Using SQLite database")
@@ -35,8 +38,13 @@ DB_PATH = BASE_DIR / "data" / "novels.db"
 def get_connection():
     """Get a database connection (SQLite or PostgreSQL)"""
     if IS_POSTGRES:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            logger.info("PostgreSQL connection established")
+            return conn
+        except Exception as e:
+            logger.error(f"PostgreSQL connection failed: {e}")
+            raise
     else:
         conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row

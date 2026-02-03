@@ -50,7 +50,16 @@ if audio_dir.exists():
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
-    init_db()
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        logger.info("Initializing database...")
+        init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        # Don't raise - allow app to start for health checks
+        # raise e
 
 
 @app.get("/")
