@@ -107,8 +107,47 @@ class UserPreferences(Base):
     tts_speed = Column(Float, default=1.0)
 
 
+class ChapterAudio(Base):
+    """Full chapter audio (concatenated from segments)"""
+    __tablename__ = 'chapter_audio'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    novel_slug = Column(String(255), nullable=False)
+    chapter_number = Column(Integer, nullable=False)
+    voice = Column(String(50), default='af_heart')
+    status = Column(String(50), default='pending')  # pending, generating, completed, failed
+    audio_url = Column(String(500), nullable=True)  # R2 URL for final audio
+    duration = Column(Float, nullable=True)  # Total duration in seconds
+    progress = Column(Integer, default=0)  # 0-100%
+    error = Column(Text, nullable=True)  # Error message if failed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_chapter_audio_lookup', 'novel_slug', 'chapter_number', unique=True),
+    )
+
+
+class AudioTiming(Base):
+    """Chunk timing data for karaoke highlighting"""
+    __tablename__ = 'audio_timings'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    novel_slug = Column(String(255), nullable=False)
+    chapter_number = Column(Integer, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    start_time = Column(Float, nullable=False)  # Start time in seconds
+    end_time = Column(Float, nullable=False)  # End time in seconds
+    text = Column(Text, nullable=False)  # Chunk text
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_audio_timings_lookup', 'novel_slug', 'chapter_number'),
+    )
+
+
 # Database connection helpers
-def get_engine(database_url: str = None):
+def get_engine(database_url: Optional[str] = None):
     """Create SQLAlchemy engine for PostgreSQL"""
     import os
     if database_url is None:

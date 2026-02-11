@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 # Lightning AI TTS service URL
 TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://localhost:8002")
 
-# Timeout for TTS requests (seconds)
-TTS_TIMEOUT = int(os.getenv("TTS_TIMEOUT", "30"))
+# Timeout for TTS requests (seconds) - needs to be high for long chunks
+TTS_TIMEOUT = int(os.getenv("TTS_TIMEOUT", "120"))
 
 # ==================== Database ====================
 
@@ -35,8 +35,8 @@ logger.info(f"Database URL configured (scheme: {_db_url.split('://')[0] if '://'
 # local = Local filesystem (development only)
 AUDIO_STORAGE_BACKEND = os.getenv("AUDIO_STORAGE_BACKEND", "cloud")
 
-# Audio files are stored per-segment. No concatenated chapter audio.
-# This is just for backward compatibility during migration
+# Local audio directory for development/caching
+# Production uses R2 for concatenated chapter audio
 AUDIO_DIR = os.getenv("AUDIO_DIR", "audio")
 
 # ==================== R2 Audio Storage (Backend) ====================

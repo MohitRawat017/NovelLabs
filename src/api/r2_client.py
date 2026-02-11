@@ -13,6 +13,7 @@ import logging
 from typing import Optional
 
 import boto3
+import httpx
 from botocore.config import Config
 
 from .config import (
@@ -102,7 +103,7 @@ def upload_chapter_audio_to_r2(
             url = f"{R2_AUDIO_PUBLIC_URL.rstrip('/')}/{key}"
         else:
             # Default R2 public URL format
-            url = f"https://pub-{R2_AUDIO_ACCOUNT_ID}.r2.dev/{key}"
+            url = f"https://{R2_AUDIO_BUCKET_NAME}.{R2_AUDIO_ACCOUNT_ID}.r2.dev/{key}"
         
         logger.info(f"✓ Uploaded chapter audio to R2: {key} ({len(audio_bytes)} bytes)")
         return url
@@ -150,8 +151,6 @@ def download_audio_from_url(url: str) -> Optional[bytes]:
     Returns:
         Audio bytes, or None if download failed
     """
-    import httpx
-    
     try:
         response = httpx.get(url, timeout=30, follow_redirects=True)
         if response.status_code == 200:

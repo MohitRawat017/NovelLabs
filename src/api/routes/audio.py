@@ -17,6 +17,7 @@ import logging
 import json
 import httpx
 import io
+import asyncio
 from datetime import datetime
 
 router = APIRouter()
@@ -103,7 +104,7 @@ async def call_tts_service(text: str, voice: str, segment_id: str) -> dict:
         TTSUnavailableError on connection errors
         TTSTimeoutError on timeout
     """
-    url = f"{TTS_SERVICE_URL}/synthesize"
+    url = f"{TTS_SERVICE_URL.rstrip('/')}/synthesize"
     payload = {
         "text": text,
         "voice": voice,
@@ -490,10 +491,10 @@ async def generate_chapter_audio(
     tts_jobs[job_key] = {"status": "generating", "progress": 0}
     
     background_tasks.add_task(
-        run_tts_generation, 
-        novel_slug, 
+        run_tts_generation,
+        novel_slug,
         chapter_number,
-        content, 
+        content,
         voice,
         job_key
     )

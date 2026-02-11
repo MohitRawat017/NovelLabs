@@ -21,9 +21,9 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     const [error, setError] = useState(null);
     const [generationStatus, setGenerationStatus] = useState(null);
 
-    // Check audio status and generate if needed
+    // Check audio status on mount (but don't auto-generate)
     useEffect(() => {
-        checkAndGenerateAudio();
+        checkAudioStatus();
     }, [novelSlug, chapterNumber]);
 
     // Update playback speed when settings change
@@ -34,7 +34,8 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         }
     }, [settings?.ttsSpeed]);
 
-    const checkAndGenerateAudio = async () => {
+    // Check if audio exists (without auto-generating)
+    const checkAudioStatus = async () => {
         setIsLoading(true);
         setError(null);
 
@@ -59,17 +60,26 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             } else if (status.generating) {
                 // Already generating - poll for completion
                 setGenerationStatus('Generating audio...');
+                setIsLoading(false);
                 pollForCompletion();
             } else {
-                // Need to generate
-                setGenerationStatus('Starting TTS generation...');
-                await handleGenerateAudio();
+                // Audio doesn't exist - let user trigger generation
+                setIsLoading(false);
+                setGenerationStatus(null);
             }
         } catch (err) {
             console.error('Audio check error:', err);
             setError('Failed to check audio status');
             setIsLoading(false);
         }
+    };
+
+    // Generate audio (triggered by user action)
+    const startAudioGeneration = async () => {
+        setIsLoading(true);
+        setError(null);
+        setGenerationStatus('Starting TTS generation...');
+        await handleGenerateAudio();
     };
 
     const handleGenerateAudio = async () => {
@@ -285,8 +295,15 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             ) : error ? (
                 <div className="audio-player-error">
                     <span>{error}</span>
-                    <button className="btn btn-sm" onClick={checkAndGenerateAudio}>
+                    <button className="btn btn-sm" onClick={checkAudioStatus}>
                         Retry
+                    </button>
+                </div>
+            ) : !audioReady ? (
+                <div className="audio-player-loading">
+                    <span>Audio not generated yet</span>
+                    <button className="btn btn-primary" onClick={startAudioGeneration}>
+                        Generate Audio
                     </button>
                 </div>
             ) : (
