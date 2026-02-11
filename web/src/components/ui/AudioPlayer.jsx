@@ -1,13 +1,12 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Play, Pause, Volume2, VolumeX, X, Loader, ChevronUp, ChevronDown } from 'lucide-react';
 import { getAudioStatus, generateChapterAudio, getAudioStreamUrl } from '../../services/api';
 import './AudioPlayer.css';
 
-// Use environment variable for production, fallback to localhost for development
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001/api';
-
 function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
     const audioRef = useRef(null);
+    const pollIntervalRef = useRef(null);
+    const pollTimeoutRef = useRef(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [audioReady, setAudioReady] = useState(false);
@@ -20,6 +19,33 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     const [isMinimized, setIsMinimized] = useState(false);
     const [error, setError] = useState(null);
     const [generationStatus, setGenerationStatus] = useState(null);
+
+    const loadAudio = useCallback((slug, chapter) => {
+        const url = `${getAudioStreamUrl(slug, chapter)}?t=${Date.now()}`;
+        setAudioUrl(url);
+        setAudioReady(true);
+        setIsLoading(false);
+        setGenerationStatus(null);
+        if (onAudioReady) {
+            setTimeout(() => onAudioReady(), 500);
+        }
+    }, [onAudioReady]);
+
+    const stopPolling = useCallback(() => {
+        if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+        }
+        if (pollTimeoutRef.current) {
+            clearTimeout(pollTimeoutRef.current);
+            pollTimeoutRef.current = null;
+        }
+    }, []);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => stopPolling();
+    }, [stopPolling]);
 
     // Check audio status on mount (but don't auto-generate)
     useEffect(() => {
@@ -34,36 +60,20 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         }
     }, [settings?.ttsSpeed]);
 
-    // Check if audio exists (without auto-generating)
     const checkAudioStatus = async () => {
         setIsLoading(true);
         setError(null);
 
         try {
-            // Check if audio exists
-            const statusRes = await fetch(
-                `${API_BASE_URL}/audio/status/${novelSlug}/${chapterNumber}`
-            );
-            const status = await statusRes.json();
+            const status = await getAudioStatus(novelSlug, chapterNumber);
 
             if (status.exists) {
-                // Audio ready - load it
-                const url = `${API_BASE_URL}/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
-                setAudioUrl(url);
-                setAudioReady(true);
-                setIsLoading(false);
-                // Notify parent that audio is ready (for fetching timings)
-                if (onAudioReady) {
-                    // Add a small delay to ensure audio is loaded before fetching timings
-                    setTimeout(() => onAudioReady(), 500);
-                }
+                loadAudio(novelSlug, chapterNumber);
             } else if (status.generating) {
-                // Already generating - poll for completion
                 setGenerationStatus('Generating audio...');
                 setIsLoading(false);
                 pollForCompletion();
             } else {
-                // Audio doesn't exist - let user trigger generation
                 setIsLoading(false);
                 setGenerationStatus(null);
             }
@@ -74,31 +84,17 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         }
     };
 
-    // Generate audio (triggered by user action)
     const startAudioGeneration = async () => {
         setIsLoading(true);
         setError(null);
         setGenerationStatus('Starting TTS generation...');
-        await handleGenerateAudio();
-    };
 
-    const handleGenerateAudio = async () => {
         try {
             const voice = settings?.voice || 'af_heart';
-            const res = await fetch(
-                `${API_BASE_URL}/audio/generate/${novelSlug}/${chapterNumber}?voice=${voice}`,
-                { method: 'POST' }
-            );
-            const data = await res.json();
+            const data = await generateChapterAudio(novelSlug, chapterNumber, voice);
 
             if (data.status === 'exists') {
-                const url = `${API_BASE_URL}/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
-                setAudioUrl(url);
-                setAudioReady(true);
-                setIsLoading(false);
-                if (onAudioReady) {
-                    setTimeout(() => onAudioReady(), 500);
-                }
+                loadAudio(novelSlug, chapterNumber);
             } else if (data.status === 'queued' || data.status === 'already_generating') {
                 setGenerationStatus('Generating audio with Kokoro TTS...');
                 pollForCompletion();
@@ -114,38 +110,29 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     };
 
     const pollForCompletion = () => {
-        const interval = setInterval(async () => {
+        stopPolling();
+
+        pollIntervalRef.current = setInterval(async () => {
             try {
-                const res = await fetch(
-                    `${API_BASE_URL}/audio/status/${novelSlug}/${chapterNumber}`
-                );
-                const status = await res.json();
+                const status = await getAudioStatus(novelSlug, chapterNumber);
 
                 if (status.exists) {
-                    clearInterval(interval);
-                    const url = `${API_BASE_URL}/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
-                    setAudioUrl(url);
-                    setAudioReady(true);
-                    setIsLoading(false);
-                    setGenerationStatus(null);
-                    // Notify parent that audio is ready
-                    if (onAudioReady) {
-                        setTimeout(() => onAudioReady(), 500);
-                    }
+                    stopPolling();
+                    loadAudio(novelSlug, chapterNumber);
                 } else if (status.error) {
-                    clearInterval(interval);
+                    stopPolling();
                     setError(status.error);
                     setIsLoading(false);
                 }
             } catch {
-                clearInterval(interval);
+                stopPolling();
                 setError('Connection lost');
                 setIsLoading(false);
             }
         }, 2000);
 
         // Timeout after 5 minutes
-        setTimeout(() => clearInterval(interval), 300000);
+        pollTimeoutRef.current = setTimeout(() => stopPolling(), 300000);
     };
 
     // Audio event handlers
@@ -156,11 +143,10 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         const handleTimeUpdate = () => {
             const time = audio.currentTime;
             const dur = audio.duration;
-            
+
             setCurrentTime(time);
             setProgress((time / dur) * 100);
-            
-            // Report time to parent for karaoke highlighting
+
             if (onTimeUpdate && dur && !isNaN(time)) {
                 onTimeUpdate(time, audio.playbackRate);
             }
@@ -168,7 +154,6 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
 
         const handleLoadedMetadata = () => {
             setDuration(audio.duration);
-            console.log('Audio loaded, duration:', audio.duration);
         };
 
         const handleEnded = () => {
@@ -176,20 +161,14 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             setProgress(0);
         };
 
-        const handleCanPlay = () => {
-            console.log('Audio can play');
-        };
-
         audio.addEventListener('timeupdate', handleTimeUpdate);
         audio.addEventListener('loadedmetadata', handleLoadedMetadata);
         audio.addEventListener('ended', handleEnded);
-        audio.addEventListener('canplay', handleCanPlay);
 
         return () => {
             audio.removeEventListener('timeupdate', handleTimeUpdate);
             audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
             audio.removeEventListener('ended', handleEnded);
-            audio.removeEventListener('canplay', handleCanPlay);
         };
     }, [audioUrl, onTimeUpdate]);
 
@@ -265,9 +244,9 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     return (
         <div className="audio-player">
             {audioUrl && (
-                <audio 
-                    ref={audioRef} 
-                    src={audioUrl} 
+                <audio
+                    ref={audioRef}
+                    src={audioUrl}
                     preload="auto"
                     crossOrigin="anonymous"
                 />

@@ -44,6 +44,7 @@ class Chapter(Base):
     title = Column(String(500))
     content = Column(Text)  # Full chapter text stored in DB
     content_path = Column(String(500))  # Legacy: path to txt file
+    content_url = Column(String(500))  # R2 URL for chapter content
     audio_path = Column(String(500))  # Legacy: path to audio file
     word_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)

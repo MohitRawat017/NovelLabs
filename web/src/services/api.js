@@ -126,14 +126,3 @@ export function getAudioStreamUrl(slug, chapterNumber) {
 export function getAudioTimingsUrl(slug, chapterNumber) {
     return `${API_BASE_URL}/audio/timings/${slug}/${chapterNumber}`;
 }
-
-// Legacy function - keeping for backward compatibility
-export function getAudioUrl(slug, chapterNumber) {
-    return `${API_BASE_URL}/audio/novel/${slug}/${chapterNumber}`;
-}
-
-export async function generateAudio(chapterId, voice = 'af_heart') {
-    return fetchAPI(`/audio/generate/${chapterId}?voice=${voice}`, {
-        method: 'POST',
-    });
-}

@@ -14,10 +14,8 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import logging
-import json
 import httpx
 import io
-import asyncio
 from datetime import datetime
 
 router = APIRouter()
@@ -127,7 +125,10 @@ async def call_tts_service(text: str, voice: str, segment_id: str) -> dict:
                 
                 # 4xx errors: do not retry, fail immediately
                 if 400 <= response.status_code < 500:
-                    error_detail = response.json().get("detail", "Invalid request")
+                    try:
+                        error_detail = response.json().get("detail", "Invalid request")
+                    except Exception:
+                        error_detail = f"TTS service error {response.status_code}"
                     raise HTTPException(status_code=response.status_code, detail=error_detail)
                 
                 # 5xx errors: retry
@@ -688,16 +689,20 @@ async def concatenate_and_upload_audio(
         return None
     
     audio_segments = []
-    
+
     # Create silence segment for gaps
     silence = AudioSegment.silent(duration=silence_gap_ms)
-    
+
     for idx, url in enumerate(audio_urls):
+        # Add silence gap between segments (not before the first one)
+        if idx > 0:
+            audio_segments.append(silence)
+
         if url is None:
-            # Skip failed segments, but add silence as placeholder
+            # Skip failed segments, add silence as placeholder
             audio_segments.append(silence)
             continue
-        
+
         try:
             # Download audio bytes
             audio_bytes = download_audio_from_url(url)
@@ -705,15 +710,11 @@ async def concatenate_and_upload_audio(
                 logger.warning(f"Could not download segment {idx}, adding silence")
                 audio_segments.append(silence)
                 continue
-            
+
             # Load as AudioSegment
             segment = AudioSegment.from_wav(io.BytesIO(audio_bytes))
             audio_segments.append(segment)
-            
-            # Add silence gap after each segment (except last)
-            if idx < len(audio_urls) - 1:
-                audio_segments.append(silence)
-                
+
         except Exception as e:
             logger.warning(f"Could not load segment {idx}: {e}, adding silence")
             audio_segments.append(silence)
