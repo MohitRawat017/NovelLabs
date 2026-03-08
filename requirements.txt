@@ -1,28 +1,17 @@
-# Core Dependencies
-numpy
+# Scraping
+beautifulsoup4>=4.12.3
+cloudscraper>=1.2.71
 
-# NLP (for text chunking)
-spacy
-
-# Web Scraping
-# beautifulsoup4==4.12.3
-# selenium==4.27.0
-# undetected-chromedriver==3.5.3
-
-# Web Backend (FastAPI) - Render deployment
+# Web backend
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.5.0
-httpx>=0.27.0  # For calling TTS service
+httpx>=0.27.0
 
-# Database
+# Database and config
 python-dotenv>=1.0.0
-sqlalchemy>=2.0.0  # ORM for models (Chapter, Novel, ChapterAudio, etc.)
-psycopg2-binary>=2.9.9  # PostgreSQL support for Render
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
 
-# Audio processing & Cloud storage (for concatenation and R2 upload)
-pydub>=0.25.1  # Audio concatenation
-boto3>=1.34.0  # Cloudflare R2 (S3-compatible)
-
-# Note: TTS (Kokoro, torch, soundfile) moved to services/tts/
-# Render backend no longer runs TTS directly - it calls Lightning AI
+# Cloud storage
+boto3>=1.34.0

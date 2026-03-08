@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovelLabs — Audio Player Demo</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0f0f14;
+            --bg-secondary: #1a1a24;
+            --bg-card: #22222e;
+            --bg-hover: #2a2a38;
+            --text-primary: #e8e6f0;
+            --text-secondary: #9896a8;
+            --text-muted: #6b6980;
+            --accent: #7c6df0;
+            --accent-glow: rgba(124, 109, 240, 0.25);
+            --accent-light: #9d91f5;
+            --success: #4ade80;
+            --border: rgba(255,255,255,0.06);
+            --chunk-active: rgba(124, 109, 240, 0.15);
+            --chunk-done: rgba(124, 109, 240, 0.05);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* ============= Header ============= */
+        .header {
+            width: 100%;
+            padding: 20px 32px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .header .logo {
+            font-family: 'Playfair Display', serif;
+            font-size: 22px;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-light), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header .badge {
+            font-size: 11px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            background: var(--accent-glow);
+            color: var(--accent-light);
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .header .meta {
+            margin-left: auto;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* ============= Main Content ============= */
+        .container {
+            max-width: 780px;
+            width: 100%;
+            padding: 40px 24px;
+        }
+
+        .chapter-info {
+            margin-bottom: 32px;
+        }
+        .chapter-info h1 {
+            font-family: 'Playfair Display', serif;
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .chapter-info .subtitle {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        /* ============= Audio Player ============= */
+        .player-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 32px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+        }
+
+        .player-top {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .play-btn {
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(135deg, var(--accent), #6354d9);
+            color: white;
+            font-size: 22px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.15s, box-shadow 0.2s;
+            box-shadow: 0 2px 12px var(--accent-glow);
+            flex-shrink: 0;
+        }
+        .play-btn:hover {
+            transform: scale(1.08);
+            box-shadow: 0 4px 20px var(--accent-glow);
+        }
+        .play-btn:active { transform: scale(0.96); }
+
+        .player-info {
+            flex: 1;
+        }
+        .player-info .voice-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .player-info .duration {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        /* Progress bar */
+        .progress-container {
+            position: relative;
+            height: 6px;
+            background: rgba(255,255,255,0.06);
+            border-radius: 3px;
+            cursor: pointer;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--accent-light));
+            border-radius: 3px;
+            width: 0%;
+            transition: width 0.1s linear;
+        }
+
+        .time-display {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* ============= Chapter Text ============= */
+        .text-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            margin-bottom: 32px;
+        }
+        .text-panel h2 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 20px;
+        }
+
+        .chunk {
+            display: inline;
+            padding: 3px 1px;
+            border-radius: 4px;
+            line-height: 1.9;
+            font-size: 16px;
+            color: var(--text-secondary);
+            transition: color 0.3s, background 0.3s;
+            cursor: pointer;
+        }
+        .chunk:hover {
+            background: rgba(255,255,255,0.04);
+        }
+        .chunk.active {
+            color: var(--text-primary);
+            background: var(--chunk-active);
+            font-weight: 500;
+        }
+        .chunk.done {
+            color: var(--text-primary);
+            background: var(--chunk-done);
+        }
+
+        /* ============= Timing Table ============= */
+        .timings-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+        }
+        .timings-panel h2 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 16px;
+        }
+
+        .timing-row {
+            display: grid;
+            grid-template-columns: 40px 70px 70px 1fr;
+            gap: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
+            transition: background 0.2s;
+        }
+        .timing-row:nth-child(even) { background: rgba(255,255,255,0.02); }
+        .timing-row.active {
+            background: var(--chunk-active);
+            color: var(--text-primary);
+        }
+        .timing-row .idx { color: var(--text-muted); font-weight: 600; }
+        .timing-row .time { font-variant-numeric: tabular-nums; color: var(--accent-light); }
+        .timing-row .text { 
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+
+        .timing-header {
+            display: grid;
+            grid-template-columns: 40px 70px 70px 1fr;
+            gap: 12px;
+            padding: 8px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 4px;
+        }
+
+        /* ============= Status Badge ============= */
+        .status-bar {
+            display: flex;
+            gap: 16px;
+            margin-top: 32px;
+            padding: 16px 20px;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+        .status-bar .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 6px;
+        }
+        .dot.green { background: var(--success); }
+        .dot.purple { background: var(--accent); }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="logo">NovelLabs</div>
+        <span class="badge">PIPELINE TEST</span>
+        <div class="meta">Generated: 2026-02-16 00:01</div>
+    </div>
+
+    <div class="container">
+        <div class="chapter-info">
+            <h1>Chapter 1 — The Envelope</h1>
+            <div class="subtitle">Test Novel · 6 chunks · 75.1s estimated</div>
+        </div>
+
+        <!-- Audio Player -->
+        <div class="player-card">
+            <div class="player-top">
+                <button class="play-btn" id="playBtn" onclick="togglePlay()">▶</button>
+                <div class="player-info">
+                    <div class="voice-name">🎤 af_heart (American Female)</div>
+                    <div class="duration">75.1s · 6 segments · WAV 24kHz</div>
+                </div>
+            </div>
+            <div class="progress-container" onclick="seekAudio(event)">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="time-display">
+                <span id="currentTime">0:00</span>
+                <span id="totalTime">1:15</span>
+            </div>
+        </div>
+
+        <!-- Chapter Text with Karaoke Highlighting -->
+        <div class="text-panel">
+            <h2>📖 Chapter Text — Karaoke Mode</h2>
+            <div id="chapterText">
+                <!-- Chunks injected by JS -->
+            </div>
+        </div>
+
+        <!-- Timing Data Visualization -->
+        <div class="timings-panel">
+            <h2>⏱️ Chunk Timing Data (from /audio/timings/ API)</h2>
+            <div class="timing-header">
+                <span>#</span>
+                <span>Start</span>
+                <span>End</span>
+                <span>Text</span>
+            </div>
+            <div id="timingRows">
+                <!-- Injected by JS -->
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <span><span class="dot green"></span>R2 Storage: Connected</span>
+            <span><span class="dot purple"></span>TTS: Kokoro (Modal)</span>
+            <span><span class="dot green"></span>Audio: Simulated</span>
+        </div>
+    </div>
+
+    <script>
+        // ==================== Data ====================
+        const chunks = [
+  {
+    "index": 0,
+    "text": "The morning sun cast long shadows across the cobblestone streets of the old district. \nMaria pulled her coat tighter as she hurried past the ancient cathedral, its spires reaching toward the grey sky like gnarled fingers.",
+    "start": 0.0,
+    "end": 14.4
+  },
+  {
+    "index": 1,
+    "text": "\"You're late,\" said Thomas, standing by the fountain. His breath formed small clouds in the cold air. \nHe held out a sealed envelope, his expression grave.",
+    "start": 14.7,
+    "end": 25.1
+  },
+  {
+    "index": 2,
+    "text": "She took it without a word, turning it over in her hands. The wax seal bore an unfamiliar crest \u2014 a serpent coiled around a crescent moon. Whatever secrets lay inside, they had traveled a long way to reach her.",
+    "start": 25.4,
+    "end": 41.4
+  },
+  {
+    "index": 3,
+    "text": "The cathedral bells began to toll, their deep resonance echoing through the empty square. \nSeven chimes. She had exactly one hour before the train departed. \nOne hour to decide whether to open the envelope or destroy it forever.",
+    "start": 41.7,
+    "end": 56.9
+  },
+  {
+    "index": 4,
+    "text": "Maria looked at Thomas one last time. His eyes betrayed nothing \u2014 not fear, not hope, not even curiosity. \nJust the calm stillness of a man who had already made peace with every possible outcome.",
+    "start": 57.2,
+    "end": 71.2
+  },
+  {
+    "index": 5,
+    "text": "\"Thank you,\" she whispered, and walked into the fog.",
+    "start": 71.5,
+    "end": 75.1
+  }
+];
+        const totalDuration = 75.10000000000001;
+        const audioSrc = "";
+
+        // ==================== Player State ====================
+        let isPlaying = false;
+        let currentTime = 0;
+        let animFrame = null;
+        let audioEl = null;
+
+        // ==================== Init ====================
+        function init() {
+            // Render chunk text
+            const textEl = document.getElementById('chapterText');
+            chunks.forEach((chunk, i) => {
+                const span = document.createElement('span');
+                span.className = 'chunk';
+                span.id = `chunk-${i}`;
+                span.textContent = chunk.text + ' ';
+                span.onclick = () => seekToChunk(i);
+                textEl.appendChild(span);
+            });
+
+            // Render timing rows
+            const rowsEl = document.getElementById('timingRows');
+            chunks.forEach((chunk, i) => {
+                const row = document.createElement('div');
+                row.className = 'timing-row';
+                row.id = `timing-${i}`;
+                row.innerHTML = `
+                    <span class="idx">${i}</span>
+                    <span class="time">${formatTime(chunk.start)}</span>
+                    <span class="time">${formatTime(chunk.end)}</span>
+                    <span class="text">${escapeHtml(chunk.text)}</span>
+                `;
+                row.onclick = () => seekToChunk(i);
+                rowsEl.appendChild(row);
+            });
+
+            // Load audio if available
+            if (audioSrc) {
+                audioEl = new Audio(audioSrc);
+                audioEl.addEventListener('timeupdate', () => {
+                    currentTime = audioEl.currentTime;
+                    updateUI();
+                });
+                audioEl.addEventListener('ended', () => {
+                    isPlaying = false;
+                    document.getElementById('playBtn').textContent = '▶';
+                });
+            }
+        }
+
+        // ==================== Controls ====================
+        function togglePlay() {
+            if (audioEl) {
+                if (isPlaying) {
+                    audioEl.pause();
+                    isPlaying = false;
+                    document.getElementById('playBtn').textContent = '▶';
+                } else {
+                    audioEl.play();
+                    isPlaying = true;
+                    document.getElementById('playBtn').textContent = '⏸';
+                }
+            } else {
+                // Simulate playback
+                if (isPlaying) {
+                    isPlaying = false;
+                    cancelAnimationFrame(animFrame);
+                    document.getElementById('playBtn').textContent = '▶';
+                } else {
+                    isPlaying = true;
+                    document.getElementById('playBtn').textContent = '⏸';
+                    simulatePlay();
+                }
+            }
+        }
+
+        function simulatePlay() {
+            const startWall = performance.now();
+            const startOffset = currentTime;
+
+            function tick() {
+                if (!isPlaying) return;
+                currentTime = startOffset + (performance.now() - startWall) / 1000;
+                if (currentTime >= totalDuration) {
+                    currentTime = totalDuration;
+                    isPlaying = false;
+                    document.getElementById('playBtn').textContent = '▶';
+                }
+                updateUI();
+                if (isPlaying) animFrame = requestAnimationFrame(tick);
+            }
+            animFrame = requestAnimationFrame(tick);
+        }
+
+        function seekAudio(e) {
+            const rect = e.target.getBoundingClientRect();
+            const pct = (e.clientX - rect.left) / rect.width;
+            currentTime = pct * totalDuration;
+            if (audioEl) audioEl.currentTime = currentTime;
+            updateUI();
+        }
+
+        function seekToChunk(i) {
+            currentTime = chunks[i].start;
+            if (audioEl) audioEl.currentTime = currentTime;
+            updateUI();
+        }
+
+        // ==================== UI Update ====================
+        function updateUI() {
+            const pct = (currentTime / totalDuration) * 100;
+            document.getElementById('progressBar').style.width = pct + '%';
+            document.getElementById('currentTime').textContent = formatTime(currentTime);
+
+            // Highlight active chunk
+            chunks.forEach((chunk, i) => {
+                const el = document.getElementById(`chunk-${i}`);
+                const row = document.getElementById(`timing-${i}`);
+                if (currentTime >= chunk.start && currentTime < chunk.end) {
+                    el.className = 'chunk active';
+                    row.className = 'timing-row active';
+                    // Scroll into view
+                    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                } else if (currentTime >= chunk.end) {
+                    el.className = 'chunk done';
+                    row.className = 'timing-row';
+                } else {
+                    el.className = 'chunk';
+                    row.className = 'timing-row';
+                }
+            });
+        }
+
+        // ==================== Helpers ====================
+        function formatTime(s) {
+            const m = Math.floor(s / 60);
+            const sec = Math.floor(s % 60);
+            return `${m}:${sec.toString().padStart(2, '0')}`;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // ==================== Start ====================
+        init();
+    </script>
+</body>
+</html>
