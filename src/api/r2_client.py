@@ -1,12 +1,4 @@
-"""
-R2 Client for NovelLabs Backend
-
-Uploads concatenated chapter audio to Cloudflare R2.
-This is used by the Render backend to store full chapter audio files.
-
-Note: The Lightning AI TTS service has its own R2 upload for segment audio.
-      This client is for the final concatenated audio uploaded by the backend.
-"""
+"""R2 client for uploading chapter audio to Cloudflare R2."""
 
 import os
 import logging

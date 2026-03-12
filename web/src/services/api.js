@@ -11,12 +11,17 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001/api'
  */
 async function fetchAPI(endpoint, options = {}) {
     const url = `${API_BASE_URL}${endpoint}`;
+    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+    const headers = {
+        ...options.headers,
+    };
+
+    if (!isFormData && options.body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+    }
 
     const response = await fetch(url, {
-        headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-        },
+        headers,
         ...options,
     });
 
@@ -49,8 +54,37 @@ export async function syncNovels() {
     return fetchAPI('/novels/sync', { method: 'POST' });
 }
 
-export async function updateNovel(slug) {
-    return fetchAPI(`/novels/${slug}/update`, { method: 'POST' });
+export async function updateNovel(slug, tocUrl = null) {
+    const body = tocUrl && tocUrl.trim()
+        ? JSON.stringify({ toc_url: tocUrl.trim() })
+        : undefined;
+
+    return fetchAPI(`/novels/${slug}/update`, {
+        method: 'POST',
+        body,
+    });
+}
+
+export async function importNovelFolder(files) {
+    const form = new FormData();
+    let folderName = '';
+
+    files.forEach((file) => {
+        const relativePath = file.webkitRelativePath || file.name;
+        if (!folderName && file.webkitRelativePath) {
+            folderName = file.webkitRelativePath.split('/')[0] || '';
+        }
+        form.append('files', file, relativePath);
+    });
+
+    if (folderName) {
+        form.append('folder_name', folderName);
+    }
+
+    return fetchAPI('/novels/import-folder', {
+        method: 'POST',
+        body: form,
+    });
 }
 
 // ================== Chapters API ==================
@@ -111,6 +145,37 @@ export async function getVoices() {
 
 export async function getAudioStatus(slug, chapterNumber) {
     return fetchAPI(`/audio/status/${slug}/${chapterNumber}`);
+}
+
+export async function getAudioHealth() {
+    return fetchAPI('/audio/health');
+}
+
+export async function listAudioJobs(slug = null) {
+    const query = slug ? `?novel_slug=${encodeURIComponent(slug)}` : '';
+    return fetchAPI(`/audio/jobs${query}`);
+}
+
+export async function getNovelVoiceProfile(slug) {
+    return fetchAPI(`/audio/profile/${slug}`);
+}
+
+export async function uploadNovelVoiceProfile(slug, { file, refText = '', displayName = '', voiceName = 'novel-default', language = 'English' }) {
+    const form = new FormData();
+    form.append('audio', file);
+    form.append('ref_text', refText);
+    form.append('display_name', displayName);
+    form.append('voice_name', voiceName);
+    form.append('language', language);
+
+    return fetchAPI(`/audio/profile/${slug}`, {
+        method: 'POST',
+        body: form,
+    });
+}
+
+export async function deleteNovelVoiceProfile(slug) {
+    return fetchAPI(`/audio/profile/${slug}`, { method: 'DELETE' });
 }
 
 export async function generateChapterAudio(slug, chapterNumber, voice = 'af_heart') {

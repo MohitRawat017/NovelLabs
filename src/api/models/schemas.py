@@ -18,6 +18,11 @@ class NovelBase(BaseModel):
 class NovelCreate(NovelBase):
     slug: str
     data_path: Optional[str] = None
+    source_toc_url: Optional[str] = None
+
+
+class NovelUpdateRequest(BaseModel):
+    toc_url: Optional[str] = None
 
 
 class NovelResponse(NovelBase):
@@ -26,6 +31,7 @@ class NovelResponse(NovelBase):
     views: int
     chapter_count: int
     data_path: Optional[str]
+    source_toc_url: Optional[str]
     last_updated: Optional[datetime]
     created_at: datetime
     
@@ -49,6 +55,9 @@ class ChapterResponse(ChapterBase):
     novel_id: int
     content_path: Optional[str]
     audio_path: Optional[str]
+    has_audio: bool = False
+    audio_provider: Optional[str] = None
+    audio_status: Optional[str] = None
     word_count: int
     created_at: datetime
     
@@ -84,6 +93,7 @@ class ScrapeStatusResponse(BaseModel):
     current_chapter: int
     total_chapters: int
     novel_title: Optional[str]
+    persisted: bool = False
     error: Optional[str] = None
 
 

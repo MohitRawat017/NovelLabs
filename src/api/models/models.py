@@ -1,7 +1,4 @@
-"""
-SQLAlchemy Models for NovelLabs
-Defines database schema with proper relationships
-"""
+"""SQLAlchemy models for NovelLabs (legacy reference)."""
 
 from datetime import datetime
 from typing import Optional
@@ -147,15 +144,14 @@ class AudioTiming(Base):
     )
 
 
-# Database connection helpers
+# Legacy database connection helpers
 def get_engine(database_url: Optional[str] = None):
-    """Create SQLAlchemy engine for PostgreSQL"""
+    """Legacy SQLAlchemy helper kept only for archival tooling."""
     import os
     if database_url is None:
         database_url = os.getenv("DATABASE_URL")
         if not database_url:
             raise ValueError("DATABASE_URL environment variable is required")
-        # Render uses postgres:// but SQLAlchemy expects postgresql://
         database_url = database_url.replace("postgres://", "postgresql://", 1)
     return create_engine(database_url, echo=False)
 

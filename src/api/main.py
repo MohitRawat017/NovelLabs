@@ -1,12 +1,8 @@
 """
-NovelLabs FastAPI Backend
-Main application entry point
-FIXED: Sync novels once on startup + added shutdown handler for connection pool
-Added: TTS service wake-up on startup (double-wake strategy)
+NovelLabs FastAPI backend.
 """
 import os
 import logging
-import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +15,7 @@ logger.info("Starting NovelLabs API...")
 
 from .routes import novels, chapters, scraper, audio
 from .database import init_db, close_connection_pool
-from .config import ALLOWED_ORIGINS, TTS_SERVICE_URL
+from .config import ALLOWED_ORIGINS, AUDIO_DIR, DATABASE_BACKEND, LOCAL_DEV_ORIGIN_REGEX
 
 logger.info("Imports completed successfully")
 
@@ -34,6 +30,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=LOCAL_DEV_ORIGIN_REGEX if DATABASE_BACKEND == "sqlite" else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,14 +48,14 @@ covers_dir = BASE_DIR / "web" / "public" / "covers"
 if covers_dir.exists():
     app.mount("/covers", StaticFiles(directory=str(covers_dir)), name="covers")
 
-audio_dir = BASE_DIR / "audio"
+audio_dir = Path(AUDIO_DIR)
 if audio_dir.exists():
     app.mount("/audio", StaticFiles(directory=str(audio_dir)), name="audio")
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database, sync novels, and wake up TTS service"""
+    """Initialize database and sync local novels."""
     logger.info("Running startup event...")
     try:
         logger.info("Initializing database...")
@@ -74,25 +71,6 @@ async def startup_event():
         except Exception as e:
             logger.error(f"Failed to sync novels on startup: {e}")
             # Don't fail startup if sync fails
-        
-        # Double-wake strategy: Wake up Lightning AI TTS service
-        # This runs async in background - don't block startup
-        try:
-            logger.info(f"Pinging TTS service at {TTS_SERVICE_URL}...")
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{TTS_SERVICE_URL}/", timeout=5)
-                if response.status_code == 200:
-                    data = response.json()
-                    logger.info(f"TTS service responded: model_loaded={data.get('model_loaded')}")
-                else:
-                    logger.warning(f"TTS service returned {response.status_code}")
-        except httpx.ConnectError:
-            logger.warning(f"TTS service not reachable at {TTS_SERVICE_URL} (may be sleeping)")
-        except httpx.ReadTimeout:
-            logger.info("TTS service is waking up (timeout expected)")
-        except Exception as e:
-            logger.warning(f"Could not ping TTS service: {e}")
-        
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         # Don't raise - allow app to start for health checks

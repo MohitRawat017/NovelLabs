@@ -1,50 +1,13 @@
 import { useState, useEffect } from 'react';
 import { X, Volume2, Type, Palette } from 'lucide-react';
+import { useTheme } from '../../context/ThemeContext';
+import { FONTS, VOICES, getSettings, saveReaderSettings } from '../../utils/readerSettings';
 import './SettingsModal.css';
 
-// English voices from Kokoro TTS
-const VOICES = {
-    "American English (Female)": [
-        "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
-        "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky"
-    ],
-    "American English (Male)": [
-        "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
-        "am_michael", "am_onyx", "am_puck", "am_santa"
-    ],
-    "British English (Female)": [
-        "bf_alice", "bf_emma", "bf_isabella", "bf_lily"
-    ],
-    "British English (Male)": [
-        "bm_daniel", "bm_fable", "bm_george", "bm_lewis"
-    ]
-};
-
-const DEFAULT_SETTINGS = {
-    fontSize: 18,
-    fontFamily: 'Georgia',
-    theme: 'dark',
-    voice: 'af_heart',
-    ttsSpeed: 1.0
-};
-
-const FONTS = [
-    { value: 'Georgia', label: 'Georgia (Serif)' },
-    { value: 'Merriweather', label: 'Merriweather' },
-    { value: 'Inter', label: 'Inter (Sans)' },
-    { value: 'system-ui', label: 'System Default' }
-];
-
-export function getSettings() {
-    try {
-        const saved = localStorage.getItem('readerSettings');
-        return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
-    } catch {
-        return DEFAULT_SETTINGS;
-    }
-}
+export { getSettings } from '../../utils/readerSettings';
 
 function SettingsModal({ isOpen, onClose, onSettingsChange }) {
+    const { theme, setTheme } = useTheme();
     const [settings, setSettings] = useState(getSettings);
 
     useEffect(() => {
@@ -53,32 +16,43 @@ function SettingsModal({ isOpen, onClose, onSettingsChange }) {
         }
     }, [isOpen]);
 
+    useEffect(() => {
+        setSettings((previous) => ({ ...previous, theme }));
+    }, [theme]);
+
     const updateSetting = (key, value) => {
         const newSettings = { ...settings, [key]: value };
         setSettings(newSettings);
-        localStorage.setItem('readerSettings', JSON.stringify(newSettings));
+
+        if (key === 'theme') {
+            setTheme(value);
+        }
+
+        saveReaderSettings(newSettings);
         onSettingsChange?.(newSettings);
     };
 
     if (!isOpen) return null;
 
     return (
-        <div className="settings-overlay" onClick={onClose}>
-            <div className="settings-modal" onClick={e => e.stopPropagation()}>
-                <header className="settings-header">
-                    <h2>Reader Settings</h2>
-                    <button className="btn btn-ghost btn-icon" onClick={onClose}>
+        <div className="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 md:p-8 animate-in fade-in duration-200" onClick={onClose}>
+            <div className="glass w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col rounded-[32px] border border-white/20 dark:border-white/10 shadow-2xl" onClick={e => e.stopPropagation()}>
+                <header className="flex items-center justify-between p-6 border-b border-stone-200/50 dark:border-white/10 bg-white/40 dark:bg-black/20">
+                    <h2 className="text-xl font-bold text-stone-900 dark:text-white mt-1">Reader Settings</h2>
+                    <button 
+                        className="w-10 h-10 rounded-full flex items-center justify-center bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 text-stone-700 dark:text-stone-300 transition-all border border-stone-200/50 dark:border-white/5" 
+                        onClick={onClose}
+                    >
                         <X size={20} />
                     </button>
                 </header>
 
-                <div className="settings-content">
-                    {/* Font Size */}
-                    <section className="settings-section">
-                        <div className="settings-label">
-                            <Type size={18} />
+                <div className="p-6 overflow-y-auto flex flex-col gap-8 bg-white/60 dark:bg-background/40">
+                    <section className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2 text-stone-600 dark:text-stone-300 font-medium">
+                            <Type size={18} className="text-violet-500" />
                             <span>Font Size</span>
-                            <span className="settings-value">{settings.fontSize}px</span>
+                            <span className="ml-auto text-violet-600 dark:text-violet-400 font-bold">{settings.fontSize}px</span>
                         </div>
                         <input
                             type="range"
@@ -86,44 +60,42 @@ function SettingsModal({ isOpen, onClose, onSettingsChange }) {
                             max="28"
                             value={settings.fontSize}
                             onChange={e => updateSetting('fontSize', parseInt(e.target.value))}
-                            className="settings-slider"
+                            className="w-full h-2 rounded-full appearance-none bg-stone-200 dark:bg-white/10 accent-violet-500 cursor-pointer"
                         />
                     </section>
 
-                    {/* Font Family */}
-                    <section className="settings-section">
-                        <div className="settings-label">
-                            <Type size={18} />
+                    <section className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2 text-stone-600 dark:text-stone-300 font-medium">
+                            <Type size={18} className="text-violet-500" />
                             <span>Font Family</span>
                         </div>
                         <select
                             value={settings.fontFamily}
                             onChange={e => updateSetting('fontFamily', e.target.value)}
-                            className="settings-select"
+                            className="w-full px-4 py-3 rounded-2xl glass-thin bg-white/70 dark:bg-black/40 border border-stone-200/50 dark:border-white/10 text-stone-800 dark:text-stone-200 outline-none focus:border-violet-500/50 appearance-none font-medium"
                         >
                             {FONTS.map(font => (
-                                <option key={font.value} value={font.value}>
+                                <option key={font.value} value={font.value} className="bg-white dark:bg-[#110e15] text-stone-800 dark:text-stone-200">
                                     {font.label}
                                 </option>
                             ))}
                         </select>
                     </section>
 
-                    {/* Theme */}
-                    <section className="settings-section">
-                        <div className="settings-label">
-                            <Palette size={18} />
-                            <span>Theme</span>
+                    <section className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2 text-stone-600 dark:text-stone-300 font-medium">
+                            <Palette size={18} className="text-violet-500" />
+                            <span>Theme Base</span>
                         </div>
-                        <div className="theme-toggle">
+                        <div className="flex gap-2">
                             <button
-                                className={`theme-btn ${settings.theme === 'light' ? 'active' : ''}`}
+                                className={`flex-1 py-3 rounded-2xl font-bold text-sm transition-all border ${settings.theme === 'light' ? 'bg-gradient-to-r from-violet-500 to-indigo-500 text-white border-transparent shadow-md' : 'glass-thin bg-white/50 dark:bg-black/20 text-stone-600 dark:text-stone-400 border-stone-200/50 dark:border-white/10 hover:bg-white/80 dark:hover:bg-white/5'}`}
                                 onClick={() => updateSetting('theme', 'light')}
                             >
                                 Light
                             </button>
                             <button
-                                className={`theme-btn ${settings.theme === 'dark' ? 'active' : ''}`}
+                                className={`flex-1 py-3 rounded-2xl font-bold text-sm transition-all border ${settings.theme === 'dark' ? 'bg-gradient-to-r from-violet-500 to-indigo-500 text-white border-transparent shadow-md' : 'glass-thin bg-white/50 dark:bg-black/20 text-stone-600 dark:text-stone-400 border-stone-200/50 dark:border-white/10 hover:bg-white/80 dark:hover:bg-white/5'}`}
                                 onClick={() => updateSetting('theme', 'dark')}
                             >
                                 Dark
@@ -131,21 +103,20 @@ function SettingsModal({ isOpen, onClose, onSettingsChange }) {
                         </div>
                     </section>
 
-                    {/* TTS Voice */}
-                    <section className="settings-section">
-                        <div className="settings-label">
-                            <Volume2 size={18} />
+                    <section className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2 text-stone-600 dark:text-stone-300 font-medium">
+                            <Volume2 size={18} className="text-violet-500" />
                             <span>TTS Voice</span>
                         </div>
                         <select
                             value={settings.voice}
                             onChange={e => updateSetting('voice', e.target.value)}
-                            className="settings-select"
+                            className="w-full px-4 py-3 rounded-2xl glass-thin bg-white/70 dark:bg-black/40 border border-stone-200/50 dark:border-white/10 text-stone-800 dark:text-stone-200 outline-none focus:border-violet-500/50 appearance-none font-medium"
                         >
                             {Object.entries(VOICES).map(([group, voices]) => (
-                                <optgroup key={group} label={group}>
+                                <optgroup key={group} label={group} className="font-bold text-stone-500 dark:text-stone-400">
                                     {voices.map(voice => (
-                                        <option key={voice} value={voice}>
+                                        <option key={voice} value={voice} className="bg-white dark:bg-[#110e15] font-normal text-stone-800 dark:text-stone-200">
                                             {voice}
                                         </option>
                                     ))}
@@ -154,12 +125,11 @@ function SettingsModal({ isOpen, onClose, onSettingsChange }) {
                         </select>
                     </section>
 
-                    {/* TTS Speed */}
-                    <section className="settings-section">
-                        <div className="settings-label">
-                            <Volume2 size={18} />
+                    <section className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2 text-stone-600 dark:text-stone-300 font-medium">
+                            <Volume2 size={18} className="text-violet-500" />
                             <span>TTS Speed</span>
-                            <span className="settings-value">{settings.ttsSpeed}x</span>
+                            <span className="ml-auto text-violet-600 dark:text-violet-400 font-bold">{settings.ttsSpeed}x</span>
                         </div>
                         <input
                             type="range"
@@ -168,7 +138,7 @@ function SettingsModal({ isOpen, onClose, onSettingsChange }) {
                             step="0.1"
                             value={settings.ttsSpeed}
                             onChange={e => updateSetting('ttsSpeed', parseFloat(e.target.value))}
-                            className="settings-slider"
+                            className="w-full h-2 rounded-full appearance-none bg-stone-200 dark:bg-white/10 accent-violet-500 cursor-pointer"
                         />
                     </section>
                 </div>

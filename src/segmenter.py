@@ -5,13 +5,9 @@ import logging
 from typing import List, Dict
 import spacy
 
-# =========================
-# CONFIGURATION
-# =========================
-
-MAX_CHARS = 250  # XTTS v2: hallucinations occur after ~250-300 chars
-MIN_CHARS = 120  # Minimum chars for better prosody
-OUTPUT_FORMAT = "json"  # Output format: json
+MAX_CHARS = 250
+MIN_CHARS = 120
+OUTPUT_FORMAT = "json"
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
@@ -19,25 +15,11 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 class SmartSegmenter:
     def __init__(self):
         print("[*] Loading lightweight SpaCy sentencizer...")
-        
-        # We only need sentence boundaries → much faster than full model
         self.nlp = spacy.blank("en")
         self.nlp.add_pipe("sentencizer")
 
-    # --------------------------------------------------
-
     def _split_long_sentence(self, sentence: str) -> List[str]:
-        """
-        Fallback splitter for extremely long sentences.
-        
-        Splits on commas, em dashes, and semicolons to prevent TTS hallucination.
-        
-        Args:
-            sentence: Long sentence to split.
-            
-        Returns:
-            List of smaller text chunks.
-        """
+        """Split long sentences on commas, em dashes, and semicolons."""
         parts = re.split(r'(,|;|—)', sentence)
         chunks = []
         current = ""
@@ -55,18 +37,8 @@ class SmartSegmenter:
 
         return chunks
 
-    # --------------------------------------------------
-
     def chunk_text(self, text: str) -> List[str]:
-        """
-        Sentence-aware, TTS-safe chunking.
-        
-        Args:
-            text: Raw text to chunk.
-            
-        Returns:
-            List of text chunks within MAX_CHARS limit.
-        """
+        """Sentence-aware, TTS-safe chunking."""
         doc = self.nlp(text)
         sentences = [s.text.strip() for s in doc.sents if s.text.strip()]
 
@@ -97,19 +69,8 @@ class SmartSegmenter:
 
         return chunks
 
-    # --------------------------------------------------
-
     def process_novel(self, novel_folder: str, output_base_dir: str = "Segmentor/output") -> Dict[str, int]:
-        """
-        Process all chapters in a novel folder.
-        
-        Args:
-            novel_folder: Path to novel folder containing chapters.
-            output_base_dir: Base directory for processed output.
-            
-        Returns:
-            Dictionary with processing statistics.
-        """
+        """Process all chapters in a novel folder."""
         novel_name = os.path.basename(novel_folder)
         chapters_dir = novel_folder
         output_dir = os.path.join(output_base_dir, novel_name)

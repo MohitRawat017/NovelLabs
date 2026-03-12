@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NovelLabs API Testing Script
-Tests all critical endpoints after deployment
+Tests all critical endpoints against the local backend
 """
 
 import requests
@@ -10,7 +10,7 @@ import sys
 from typing import Dict, Any
 
 # API base URL
-BASE_URL = "https://novellabs.onrender.com"
+BASE_URL = "http://127.0.0.1:8001"
 
 # Test results
 results = []

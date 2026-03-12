@@ -1,7 +1,4 @@
-"""
-Chapters API routes - FIXED VERSION
-Prevents content bloat by not storing chapter content in database
-"""
+"""Chapters API routes."""
 
 import os
 import re
@@ -21,6 +18,17 @@ logger = logging.getLogger(__name__)
 # Base directory
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 AUDIO_DIR = BASE_DIR / "audio"
+
+
+def _normalize_chapter_audio_metadata(chapter: dict) -> dict:
+    audio_path = chapter.get("audio_path")
+    audio_status = chapter.get("audio_status")
+    has_audio = bool(audio_path) or audio_status == "completed"
+    chapter["has_audio"] = has_audio
+    chapter["audio_status"] = audio_status or ("completed" if has_audio else None)
+    if has_audio:
+        chapter["audio_provider"] = chapter.get("audio_provider") or "kokoro"
+    return chapter
 
 
 def sync_chapters_for_novel(novel_id: int, data_path: str):
@@ -106,17 +114,17 @@ class ChapterMetadataCreate(BaseModel):
 
 
 class ContentUrlUpdate(BaseModel):
-    """Schema for updating chapter content URL (R2)"""
+    """Legacy schema for storing a remote chapter content URL."""
     content_url: str
 
 
 @router.patch("/novel/{slug}/{chapter_number}/content-url")
 async def update_chapter_content_url(slug: str, chapter_number: int, data: ContentUrlUpdate):
     """
-    Update chapter with R2 content URL
-    
-    Use this after uploading chapter content to Cloudflare R2.
-    The API will then fetch content from R2 instead of local filesystem.
+    Legacy endpoint for storing a remote chapter content URL.
+
+    Local-first runs read chapter text from the filesystem. This endpoint is
+    kept for backward compatibility only.
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -152,9 +160,9 @@ async def create_chapter_metadata(chapter: ChapterMetadataCreate):
     Content is read from content_path when needed.
     
     Benefits:
-    - 90% reduction in database size
-    - Faster API responses (less data transfer)
-    - Better for production scaling
+    - smaller SQLite database
+    - faster local API responses
+    - chapter text stays in plain files under data/output
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -293,19 +301,28 @@ async def list_chapters(
         if data_path:
             sync_chapters_for_novel(novel_id, data_path)
         
-        # Get chapters
+        # Get chapters with audio metadata
         order = "ASC" if sort == "asc" else "DESC"
-        query = f'SELECT * FROM chapters WHERE novel_id = ?'
-        params = [novel_id]
-        
+        query = f"""
+            SELECT
+                c.*,
+                COALESCE(ca.provider, CASE WHEN c.audio_path IS NOT NULL THEN 'kokoro' END) AS audio_provider,
+                COALESCE(ca.status, CASE WHEN c.audio_path IS NOT NULL THEN 'completed' END) AS audio_status
+            FROM chapters c
+            LEFT JOIN chapter_audio ca
+                ON ca.novel_slug = ? AND ca.chapter_number = c.chapter_number
+            WHERE c.novel_id = ?
+        """
+        params = [slug, novel_id]
+
         if search:
-            query += ' AND (title LIKE ? OR chapter_number = ?)'
+            query += ' AND (c.title LIKE ? OR c.chapter_number = ?)'
             params.extend([f'%{search}%', search if search.isdigit() else -1])
-        
-        query += f' ORDER BY chapter_number {order}'
-        
+
+        query += f' ORDER BY c.chapter_number {order}'
+
         cursor.execute(query, params)
-        chapters = list_from_rows(cursor.fetchall())
+        chapters = [_normalize_chapter_audio_metadata(chapter) for chapter in list_from_rows(cursor.fetchall())]
         
     return ChapterListResponse(chapters=chapters, total=len(chapters))
 

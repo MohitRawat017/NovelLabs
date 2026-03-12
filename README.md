@@ -1,116 +1,194 @@
-# NovelLabs AudioBook Generator
+# NovelLabs
 
-> **Turn any web novel into an immersive audiobook experience.**  
-> A complete production pipeline featuring smart scraping, intelligent text segmentation, and high-quality GPU-accelerated TTS.
+> **Turn any web novel into an immersive audiobook experience.**
 
-![Project Banner](docs/banner_placeholder.png)
+A local-first reading and audiobook pipeline with intelligent text segmentation and GPU-accelerated TTS.
 
-## ✨ Key Features
+## Why this is interesting
+NovelLabs bridges the gap between raw web scraped text and a premium audible experience. It intelligently segments chapters, generates perfectly timed JSON data alongside local WAV files, and syncs them in a karaoke-style web player. No cloud subscriptions, no API limits — just your library, processed by state-of-the-art open models right on your machine.
 
-### 🎤 Karaoke-Style Reading
-Experience novels like never before. As the audio plays, the current text chunk is **highlighted in real-time** and the page **auto-scrolls** to follow the narration.
-* *Audio & text perfectly synced using generated timing data.*
-
-### 🧠 Smart Background Scraping
-Don't let missing chapters stop you. The system automatically detects missing content and launches **concurrent scraping jobs** in the background, managed via a floating status panel.
-* *CloudFlare bypass included.*
-
-### 🎧 High-Quality Neural TTS
-Powered by **Kokoro TTS**, producing human-like narration with emotional range.
-* **10+ Voices**: British, American
-* **GPU Accelerated**: Blazing fast generation on NVIDIA cards.
-
-### 📚 Personal Library
-Manage your collection with a beautiful, dark-themed UI. Track your reading progress, resume where you left off, and customize fonts and themes.
+## Key Features
+- **Karaoke-Style Reading**: Real-time text highlighting and intelligent handoff scrolling that seamlessly follows the audio playback chunk by chunk.
+- **High-Quality Local Neural TTS**: Out-of-the-box support for Kokoro (in-process) and Qwen3 TTS (via local server), including voice-cloning capabilities.
+- **Dual-Theme Design**: Features a beautiful, glassmorphism UI that fully supports and dynamically switches between rich light and dark themed reading experiences. Built-in interactive floating audio players hand off seamlessly as you read.
+- **Personal Library Management**: Track reading progress, manage downloads, and customize your experience with local SQLite storage.
 
 ---
 
-## 🏗️ Architecture
+## Screenshots
 
-```mermaid
-graph TD
-    A[Web Scraper] -->|Raw HTML| B(Text Segmenter)
-    B -->|Cleaned JSON| C{Audio Engine}
-    C -->|WAV Audio| D[File System]
-    C -->|Timing JSON| D
-    D -->|Serve Static| E[FastAPI Backend]
-    E <-->|JSON API| F[React Frontend]
-    
-    subgraph Frontend Logic
-    F --> G[AudioPlayer]
-    G -->|Time Updates| H[ChapterReader]
-    H -->|Auto-Scroll| I(Karaoke UI)
-    end
-```
+<div align="center">
+  <img src="docs/screenshots/home-dark.png" alt="NovelLabs Dark Mode Home">
+  <p><em>The default dark fantasy reading dashboard.</em></p>
+</div>
 
-## 🚀 Quick Start
+### Same app, two complete moods
+<div align="center">
+  <img src="docs/screenshots/home-dark.png" width="48%" alt="Dark Mode">
+  <img src="docs/screenshots/home-light.png" width="48%" alt="Light Mode">
+</div>
+
+### Library Overview
+<div align="center">
+  <img src="docs/screenshots/library-dark.png" alt="Personal Library">
+</div>
+
+### Chapter Reader & Audio Handoff
+<div align="center">
+  <img src="docs/screenshots/reader-dark.png" alt="Reader Window synced with Audio highlighting">
+</div>
+
+### Novel Detail & Voice Workflow
+<div align="center">
+  <img src="docs/screenshots/novel-detail-qwen.png" alt="Novel specific processing options">
+</div>
+
+### Generation Tracking
+<div align="center">
+  <img src="docs/screenshots/audio-generation-progress.png" alt="TTS Chunk Progress">
+</div>
+
+---
+
+## Quick Start (Kokoro TTS)
+
+The fastest way to get started using the built-in Kokoro TTS engine. 
 
 ### Prerequisites
-- Python 3.10+
+- Python **3.11 or 3.12** (Kokoro relies on specific dependency versions not fully supported on 3.13+)
 - Node.js 18+
-- NVIDIA GPU (Recommended for speed)
+- NVIDIA GPU with CUDA (strongly recommended)
 
-### 1. Backend Setup
+### 1. Start the Backend
 ```bash
-# Clone the repo
-git clone https://github.com/yourusername/NovelLabs.git
-cd NovelLabs
-
-# Setup Python Environment
+# 1. Create and activate a virtual environment
 python -m venv .venv
-.venv\Scripts\activate
+# Windows: .venv\Scripts\activate | macOS/Linux: source .venv/bin/activate
 
-# Install Dependencies
+# 2. Install dependencies
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm
 
-# Start Server
-python -m uvicorn src.api.main:app --reload --port 8001
+# 3. Start the server (runs on port 8001)
+uvicorn src.api.main:app --reload --port 8001
 ```
 
-### 2. Frontend Setup
+### 2. Start the Frontend
 ```bash
+# In a new terminal
 cd web
 npm install
 npm run dev
 ```
-
-Visit **http://localhost:5173** to start reading!
-
----
-
-## 🗺️ Project Roadmap
-
-We are actively expanding NovelLabs. Here is what's coming next:
-
-- [x] **Database Integration**: PostgreSQL on Render for robust data handling.
-- [ ] **Personalized Libraries**: View and follow other users' reading lists and libraries.
-- [ ] **Advanced TTS**: Integrate **Qwen3-TTS** for next-gen voice quality.
-- [ ] **Character Voice Mapping**: Auto-detect dialogue speakers and assign distinct voices.
-- [ ] **Multi-Source Scraping**: Plugins for RoyalRoad, WebNovel, and ScribbleHub.
-- [ ] **UI/UX Polish**: Enhanced animations and mobile-responsive layout.
+Open **http://localhost:5173** in your browser.
 
 ---
 
+## Deep Dive: TTS Setup
 
-## 📂 Project Structure
+NovelLabs supports two distinct TTS flows. Kokoro is the simplest and runs directly inside the backend process. Qwen requires a sibling repository sidecar.
 
+### 1. Kokoro Setup (Default)
+By default, the backend loads Kokoro. Ensure your `.env` contains:
+```env
+TTS_PROVIDER=kokoro
+TTS_DEVICE=auto
+TTS_VOICE=af_heart
 ```
+**To verify the active provider**: Look at the startup logs of your `uvicorn` backend. It will explicitly announce `[TTS_PROVIDER: kokoro]` during initialization.
+
+> **Common Kokoro Pitfall**: If you encounter errors related to `misbah/soundfile` or unsupported dependencies, you are likely running Python 3.14 or a newer incompatible version. Recreate your `.venv` explicitly with Python 3.11 or 3.12.
+
+### 2. Qwen Setup (Advanced)
+Qwen runs as a separate local server. You must clone the `faster-qwen3-tts` repository as a **sibling** directory to this project, not inside it!
+
+1. **Clone the sibling repo and setup its environment**:
+```bash
+# Go to the parent directory of NovelLabs
+git clone https://github.com/andimarafioti/faster-qwen3-tts.git
+cd faster-qwen3-tts
+python -m venv .venv
+# Activate the venv and install
+pip install ".[demo]"
+```
+
+2. **Start the Qwen Service on port 8000**:
+There are two distinct runmodes for Qwen depending on your goal.
+
+*Standard Synthesis (OpenAI Mode)*:
+```bash
+python -m faster_qwen3_tts.examples.openai_server --model Qwen/Qwen3-TTS-12Hz-0.6B-Base --language English --port 8000
+```
+*Voice Cloning (Demo Mode)* - **Required** for the uploaded reference voice flow:
+```bash
+python demo/server.py --model Qwen/Qwen3-TTS-12Hz-0.6B-Base --port 8000
+```
+
+> **Recommended Model**: Strongly recommend sticking to `Qwen/Qwen3-TTS-12Hz-0.6B-Base`. **DO NOT** use `CustomVoice` configurations if you want to use the uploaded reference-voice cloning flow within NovelLabs.
+
+3. **Configure the NovelLabs `.env`**:
+```env
+TTS_PROVIDER=qwen3
+QWEN_TTS_BASE_URL=http://localhost:8000
+QWEN_TTS_API_STYLE=demo  # or 'openai' depending on how you started it
+QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-Base
+```
+
+---
+
+## Troubleshooting & Pitfalls
+
+If you hit a wall, check these specific issues we've verified during development:
+
+- **Changed `.env` but provider did not switch**
+  The active TTS provider is loaded dynamically on backend startup. You must restart the `uvicorn` process for changes to take effect.
+- **Qwen service refused connection**
+  Ensure the Qwen server is actually running, bound to port `8000`, and that you launched it from inside the `faster-qwen3-tts` repo, not the NovelLabs root.
+- **Ran `demo/server.py` from this repo**
+  The `demo/server.py` script is explicitly part of the `faster-qwen3-tts` repository. Starting it from inside NovelLabs will fail.
+- **CUDA graphs require CUDA device**
+  You have the CPU-only version of PyTorch installed. **Fix**: Wipe the environment in your `faster-qwen3-tts` folder and reinstall PyTorch with the specific `--index-url` for your CUDA version before installing the repo requirements.
+- **Safetensor invalid JSON / corrupted model download**
+  This happens when the Hugging Face cache gets interrupted. **Fix**: Delete the cached Qwen model from your `~/.cache/huggingface/hub` folder and restart the server to force a clean redownload.
+- **SoX warning on Windows**
+  You may see a `sox` missing warning in your terminal on Windows. You can safely ignore this; it is not the primary blocker for audio generation.
+- **Wrong Qwen model for voice cloning**
+  The `CustomVoice` models do not support the zero-shot uploaded reference voice flow. You must use a `Base` model (like `Qwen/Qwen3-TTS-12Hz-0.6B-Base`).
+- **Qwen takes a long time or seems stuck**
+  Chapters are chunked for processing. Long chapters can take many per-chunk requests. Ensure the frontend progress bar is incrementing—it is normal for an entire chapter to take 1-3 minutes depending on your GPU.
+- **Frontend still shows old behavior**
+  If you swapped from Kokoro to Qwen or changed the `API_STYLE`, always hard refresh the frontend (`Ctrl/Cmd + Shift + R`) and confirm the backend was restarted.
+
+---
+
+## Architecture
+
+NovelLabs is designed for local ownership.
+
+- **Local SQLite**: All progress, libraries, and settings are handled via `sqlite` in the `data/` folder.
+- **Local Audio Output**: Everything caches to `/audio/` and serves directly to the React frontend.
+- **Local Qwen Sidecar**: Keeps the main app lightweight by offloading heavy ML inference to a dedicated sibling API.
+
+```text
 NovelLabs/
-├── audio/              # Generated WAVs & Timing JSONs
-├── data/               # Scraped Novel Text
-├── src/
-│   ├── api/            # FastAPI Routes & Logic
-│   ├── scraper.py      # Selenium/BS4 Scraper
-│   └── segmenter.py    # NLP Text Chunking
-└── web/                # React Frontend (Vite)
-    ├── src/
-    │   ├── components/ # UI Components (AudioPlayer, etc.)
-    │   └── pages/      # Views (Library, ChapterReader)
+├── audio/              Generated WAV files and timing JSON
+├── data/               SQLite database and output text files
+├── docs/screenshots/   Project demonstration images
+├── src/api/            FastAPI backend, TTS routing, segmenter
+└── web/                React frontend (Vite)
 ```
 
-## 🤝 Contributing
-Contributions are welcome! Please open an issue or PR for any features in the roadmap.
+---
 
-## 📄 License
-MIT License.
+*Open Source & Credits* 
+Built and open-sourced for local reading enthusiasts. If you find this useful, consider contributing or tracking development on [GitHub](https://github.com/MohitRawat017/NovelLabs).
+
+<!--
+CONTRIBUTOR NOTE: What gets engagement?
+When updating screenshots for a launch or PR, prioritize:
+1. Dark mode home page (most dramatic/eye-catching).
+2. Light vs. dark comparison strictly adjacent to prove the theme work.
+3. Chapter reader showing the synced karaoke highlight along with the glassmorphism audio player.
+4. Qwen voice profile / per-novel tracking to highlight local AI capability.
+5. The library overview with populated, real data (not placeholder cards).
+- Full-page screenshots typically perform better than tightly cropped fragments. 
+-->

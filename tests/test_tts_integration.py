@@ -1,443 +1,177 @@
 """
-TTS Integration Test Suite
-Tests connectivity between Render Backend and Lightning AI TTS Service
+Local API + TTS smoke checks.
 
-Run with: python tests/test_tts_integration.py
-
-Environment Variables Required:
-- DATABASE_URL: PostgreSQL connection string
-- TTS_SERVICE_URL: Lightning AI TTS service URL (optional, defaults to localhost:8002)
+Run after starting the backend locally:
+    python tests/test_tts_integration.py
+Optional full generation:
+    python tests/test_tts_integration.py --full --slug renegade-immortal --chapter 1
 """
 
-import os
+from __future__ import annotations
+
+import argparse
 import sys
 import time
+
 import httpx
-from pathlib import Path
-from typing import Optional
 
-# Add project root to path
-BASE_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BASE_DIR))
+API_URL = "http://localhost:8001/api"
 
-# Configuration
-API_URL = os.getenv("API_URL", "https://novellabs.onrender.com/api")
-TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://localhost:8002")
-
-# Test results tracker
 passed_count = 0
 failed_count = 0
-errors_list = []
+errors_list: list[str] = []
 
 
-def test_passed(name, details=""):
+def test_passed(name: str, details: str = ""):
     global passed_count
     passed_count += 1
-    print(f"  ✅ {name}" + (f" - {details}" if details else ""))
+    print(f"  PASS {name}" + (f" - {details}" if details else ""))
 
 
-def test_failed(name, error):
+def test_failed(name: str, error: str):
     global failed_count
     failed_count += 1
     errors_list.append(f"{name}: {error}")
-    print(f"  ❌ {name}: {error}")
+    print(f"  FAIL {name}: {error}")
 
 
-def test_skipped(name, reason):
-    print(f"  ⏭️  {name}: {reason}")
+def test_skipped(name: str, reason: str):
+    print(f"  SKIP {name}: {reason}")
 
 
-# ==================== BACKEND API TESTS ====================
+def get_json(path: str, timeout: int = 15):
+    response = httpx.get(f"{API_URL}{path}", timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
-def test_backend_health():
-    """Test if Render backend is reachable"""
-    print("\n📡 Testing Backend (Render) Connection...")
-    
-    # Try the root endpoint first (without /api)
-    base_url = API_URL.replace("/api", "")
-    
+
+def post_json(path: str, timeout: int = 30):
+    response = httpx.post(f"{API_URL}{path}", timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
+def test_backend_health() -> bool:
     try:
-        response = httpx.get(f"{base_url}/", timeout=30)  # Longer timeout for cold start
-        if response.status_code == 200:
-            test_passed("Backend health check", f"Status: {response.status_code}")
+        data = get_json("/health", timeout=10)
+        test_passed("Backend health", str(data))
+        return True
+    except Exception as exc:
+        test_failed("Backend health", str(exc))
+        return False
+
+
+def test_tts_health() -> bool:
+    try:
+        data = get_json("/audio/health", timeout=20)
+        if data.get("tts_available"):
+            test_passed("Local TTS health", f"device={data.get('device')}")
             return True
-        else:
-            # Try the /api endpoint
-            response = httpx.get(f"{API_URL}/health", timeout=10)
-            if response.status_code == 200:
-                test_passed("Backend health check", f"Status: {response.status_code}")
-                return True
-            test_failed("Backend health check", f"Status: {response.status_code}")
-            return False
-    except httpx.ConnectError:
-        test_failed("Backend health check", f"Cannot connect to {API_URL}")
+        test_failed("Local TTS health", data.get("error", "TTS unavailable"))
         return False
-    except httpx.ReadTimeout:
-        test_failed("Backend health check", "Request timed out (Render may be waking up)")
-        print("    💡 Try again in 30-60 seconds")
-        return False
-    except Exception as e:
-        test_failed("Backend health check", str(e))
+    except Exception as exc:
+        test_failed("Local TTS health", str(exc))
         return False
 
 
-def test_backend_novels():
-    """Test if novels endpoint works"""
+def test_tts_voices() -> bool:
     try:
-        response = httpx.get(f"{API_URL}/novels", timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            count = data.get("total", len(data.get("novels", [])))
-            test_passed("Backend novels endpoint", f"Found {count} novels")
-            return True
-        else:
-            test_failed("Backend novels endpoint", f"Status: {response.status_code}")
-            return False
-    except Exception as e:
-        test_failed("Backend novels endpoint", str(e))
+        data = get_json("/audio/voices")
+        total = sum(len(group) for group in data.values())
+        test_passed("Voice list", f"{total} voices")
+        return True
+    except Exception as exc:
+        test_failed("Voice list", str(exc))
         return False
 
 
-def test_backend_chapter_content():
-    """Test if chapter content can be fetched"""
+def test_novel_listing() -> list[dict]:
     try:
-        # Try to get chapter 1 of any novel
-        novels_resp = httpx.get(f"{API_URL}/novels", timeout=10)
-        if novels_resp.status_code != 200:
-            test_skipped("Backend chapter content", "No novels available")
-            return False
-        
-        novels = novels_resp.json().get("novels", [])
-        if not novels:
-            test_skipped("Backend chapter content", "No novels in database")
-            return False
-        
-        slug = novels[0]["slug"]
-        response = httpx.get(f"{API_URL}/chapters/novel/{slug}/1", timeout=15)
-        
-        if response.status_code == 200:
-            data = response.json()
-            has_content = bool(data.get("content"))
-            test_passed("Backend chapter content", f"Chapter has content: {has_content}")
-            return has_content
-        else:
-            test_failed("Backend chapter content", f"Status: {response.status_code}")
-            return False
-    except Exception as e:
-        test_failed("Backend chapter content", str(e))
-        return False
+        data = get_json("/novels")
+        novels = data.get("novels", [])
+        test_passed("Novel listing", f"{len(novels)} novels")
+        return novels
+    except Exception as exc:
+        test_failed("Novel listing", str(exc))
+        return []
 
 
-# ==================== TTS SERVICE TESTS ====================
-
-def test_tts_health():
-    """Test if Lightning AI TTS service is reachable"""
-    print("\n🎤 Testing TTS Service (Lightning AI) Connection...")
-    
+def test_audio_status(slug: str, chapter: int) -> bool:
     try:
-        response = httpx.get(f"{TTS_SERVICE_URL}/", timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            model_loaded = data.get("model_loaded", False)
-            gpu_available = data.get("gpu_available", False)
-            test_passed("TTS health check", f"Model loaded: {model_loaded}, GPU: {gpu_available}")
-            return model_loaded
-        else:
-            test_failed("TTS health check", f"Status: {response.status_code}")
-            return False
-    except httpx.ConnectError:
-        test_failed("TTS health check", f"Cannot connect to {TTS_SERVICE_URL}")
-        print(f"    💡 Make sure TTS service is running at {TTS_SERVICE_URL}")
-        return False
-    except httpx.ReadTimeout:
-        test_failed("TTS health check", "Request timed out (model may still be loading)")
-        return False
-    except Exception as e:
-        test_failed("TTS health check", str(e))
+        data = get_json(f"/audio/status/{slug}/{chapter}")
+        test_passed("Audio status", f"status={data.get('status')}")
+        return True
+    except Exception as exc:
+        test_failed("Audio status", str(exc))
         return False
 
 
-def test_tts_voices():
-    """Test if TTS voices endpoint works"""
+def test_full_audio_generation(slug: str, chapter: int) -> bool:
     try:
-        response = httpx.get(f"{TTS_SERVICE_URL}/voices", timeout=10)
-        if response.status_code == 200:
-            voices = response.json()
-            total = sum(len(v) for v in voices.values())
-            test_passed("TTS voices endpoint", f"Found {total} voices")
-            return True
-        else:
-            test_failed("TTS voices endpoint", f"Status: {response.status_code}")
-            return False
-    except Exception as e:
-        test_failed("TTS voices endpoint", str(e))
+        data = post_json(f"/audio/generate/{slug}/{chapter}?voice=af_heart")
+        test_passed("Generation trigger", data.get("status", "ok"))
+    except Exception as exc:
+        test_failed("Generation trigger", str(exc))
         return False
 
-
-def test_tts_synthesize():
-    """Test TTS synthesis (requires model to be loaded)"""
-    try:
-        payload = {
-            "text": "Hello, this is a test of the text to speech system.",
-            "voice": "af_heart",
-            "segment_id": "test_segment_001"
-        }
-        
-        print("    ⏳ Synthesizing test audio (may take 10-30s)...")
-        response = httpx.post(
-            f"{TTS_SERVICE_URL}/synthesize",
-            json=payload,
-            timeout=60  # Longer timeout for synthesis
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            audio_url = data.get("audio_url", "")
-            duration = data.get("duration", 0)
-            test_passed("TTS synthesize endpoint", f"Duration: {duration:.2f}s, URL: {audio_url[:50]}...")
-            return audio_url
-        else:
-            error = response.json().get("detail", response.text)
-            test_failed("TTS synthesize endpoint", f"Status: {response.status_code}, Error: {error}")
-            return None
-    except httpx.ReadTimeout:
-        test_failed("TTS synthesize endpoint", "Request timed out (synthesis may be slow)")
-        return None
-    except Exception as e:
-        test_failed("TTS synthesize endpoint", str(e))
-        return None
-
-
-def test_audio_url_accessible(audio_url: str):
-    """Test if generated audio URL is accessible"""
-    if not audio_url:
-        test_skipped("Audio URL accessible", "No audio URL to test")
-        return False
-    
-    try:
-        response = httpx.head(audio_url, timeout=10, follow_redirects=True)
-        if response.status_code == 200:
-            content_type = response.headers.get("content-type", "")
-            test_passed("Audio URL accessible", f"Content-Type: {content_type}")
-            return True
-        else:
-            test_failed("Audio URL accessible", f"Status: {response.status_code}")
-            return False
-    except Exception as e:
-        test_failed("Audio URL accessible", str(e))
-        return False
-
-
-# ==================== INTEGRATION TESTS ====================
-
-def test_backend_calls_tts():
-    """Test if backend can call TTS service through its API"""
-    print("\n🔗 Testing Backend ↔ TTS Integration...")
-    
-    try:
-        # Get voices through backend (which proxies to TTS)
-        response = httpx.get(f"{API_URL}/audio/voices", timeout=15)
-        if response.status_code == 200:
-            voices = response.json()
-            total = sum(len(v) for v in voices.values())
-            test_passed("Backend → TTS voices proxy", f"Found {total} voices")
-            return True
-        else:
-            test_failed("Backend → TTS voices proxy", f"Status: {response.status_code}")
-            return False
-    except Exception as e:
-        test_failed("Backend → TTS voices proxy", str(e))
-        return False
-
-
-def test_audio_status_endpoint():
-    """Test audio status endpoint"""
-    try:
-        # Check status for a chapter
-        novels_resp = httpx.get(f"{API_URL}/novels", timeout=10)
-        if novels_resp.status_code != 200:
-            test_skipped("Audio status endpoint", "No novels available")
-            return False
-        
-        novels = novels_resp.json().get("novels", [])
-        if not novels:
-            test_skipped("Audio status endpoint", "No novels in database")
-            return False
-        
-        slug = novels[0]["slug"]
-        response = httpx.get(f"{API_URL}/audio/status/{slug}/1", timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            exists = data.get("exists", False)
-            generating = data.get("generating", False)
-            test_passed("Audio status endpoint", f"Exists: {exists}, Generating: {generating}")
-            return True
-        elif response.status_code == 404:
-            test_passed("Audio status endpoint", "Chapter not found (expected)")
-            return True
-        else:
-            test_failed("Audio status endpoint", f"Status: {response.status_code}")
-            return False
-    except Exception as e:
-        test_failed("Audio status endpoint", str(e))
-        return False
-
-
-def test_r2_audio_config():
-    """Test if R2 audio configuration is accessible via backend health"""
-    print("\n☁️  Testing R2 Audio Storage Configuration...")
-    
-    try:
-        # The backend's wake endpoint should confirm R2 is configured
-        response = httpx.get(f"{API_URL}/audio/wake", timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            tts_ok = data.get("tts_service", False)
-            test_passed("R2 Audio Config check", f"TTS service reachable: {tts_ok}")
-            return True
-        else:
-            test_failed("R2 Audio Config check", f"Status: {response.status_code}")
-            return False
-    except Exception as e:
-        test_failed("R2 Audio Config check", str(e))
-        return False
-
-
-def test_full_audio_generation(slug: Optional[str] = None, chapter: int = 1):
-    """
-    Test full audio generation flow (optional - may take minutes)
-    Only run if explicitly requested
-    """
-    if not slug:
-        # Try to get first novel
+    for _ in range(60):
+        time.sleep(5)
         try:
-            novels_resp = httpx.get(f"{API_URL}/novels", timeout=10)
-            if novels_resp.status_code == 200:
-                novels = novels_resp.json().get("novels", [])
-                if novels:
-                    slug = novels[0]["slug"]
-        except:
-            pass
-    
-    if not slug:
-        test_skipped("Full audio generation", "No novel slug provided")
-        return False
-    
-    print(f"\n🎵 Testing Full Audio Generation for {slug}/Chapter {chapter}...")
-    print("    ⚠️  This test may take 1-5 minutes")
-    
-    try:
-        # Trigger generation - uses path parameters, not JSON body
-        print("    ⏳ Triggering audio generation...")
-        response = httpx.post(
-            f"{API_URL}/audio/generate/{slug}/{chapter}?voice=af_heart",
-            timeout=30
-        )
-        
-        if response.status_code not in [200, 202]:
-            test_failed("Audio generation trigger", f"Status: {response.status_code}")
+            status = get_json(f"/audio/status/{slug}/{chapter}")
+        except Exception as exc:
+            test_failed("Generation polling", str(exc))
             return False
-        
-        data = response.json()
-        test_passed("Audio generation trigger", f"Job started: {data.get('message', 'OK')}")
-        
-        # Poll for completion
-        max_wait = 300  # 5 minutes
-        poll_interval = 10
-        elapsed = 0
-        
-        while elapsed < max_wait:
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-            
-            status_resp = httpx.get(f"{API_URL}/audio/status/{slug}/{chapter}", timeout=10)
-            if status_resp.status_code == 200:
-                status_data = status_resp.json()
-                progress = status_data.get("progress", 0)
-                status = status_data.get("status", "unknown")
-                
-                print(f"    📊 Progress: {progress}% - Status: {status}")
-                
-                if status == "completed":
-                    audio_url = status_data.get("audio_url", "")
-                    duration = status_data.get("duration", 0)
-                    test_passed("Full audio generation", f"Duration: {duration:.2f}s, URL: {audio_url[:60]}...")
-                    return audio_url
-                elif status == "failed":
-                    error = status_data.get("error", "Unknown error")
-                    test_failed("Full audio generation", f"Generation failed: {error}")
-                    return False
-            else:
-                print(f"    ⚠️  Could not get status: {status_resp.status_code}")
-        
-        test_failed("Full audio generation", f"Timed out after {max_wait}s")
-        return False
-        
-    except Exception as e:
-        test_failed("Full audio generation", str(e))
-        return False
 
+        if status.get("status") == "completed":
+            test_passed("Full audio generation", f"duration={status.get('duration')}")
+            return True
+        if status.get("status") == "failed":
+            test_failed("Full audio generation", status.get("error", "unknown error"))
+            return False
 
-# ==================== MAIN ====================
+    test_failed("Full audio generation", "timed out")
+    return False
+
 
 def print_summary():
-    print("\n" + "=" * 60)
-    print(f"📊 TEST SUMMARY: {passed_count} passed, {failed_count} failed")
-    print("=" * 60)
-    
+    print("\n" + "=" * 50)
+    print(f"SUMMARY: {passed_count} passed, {failed_count} failed")
     if errors_list:
-        print("\n❌ Failures:")
         for error in errors_list:
-            print(f"   • {error}")
-    
-    if failed_count == 0:
-        print("\n🎉 All tests passed! Backend and TTS service are connected properly.")
-    else:
-        print("\n💡 Tips:")
-        print("   • Make sure TTS_SERVICE_URL is set correctly")
-        print("   • Check if Lightning AI service is running")
-        print("   • Verify R2 credentials are configured on TTS service")
+            print(f"  - {error}")
+    print("=" * 50)
 
 
-def main():
-    print("=" * 60)
-    print("  TTS INTEGRATION TEST SUITE")
-    print("=" * 60)
-    print(f"\nBackend URL:     {API_URL}")
-    print(f"TTS Service URL: {TTS_SERVICE_URL}")
-    
-    # Check for full generation flag
-    run_full_gen = "--full" in sys.argv or "-f" in sys.argv
-    
-    # Backend tests
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true")
+    parser.add_argument("--slug")
+    parser.add_argument("--chapter", type=int, default=1)
+    args = parser.parse_args()
+
     backend_ok = test_backend_health()
-    if backend_ok:
-        test_backend_novels()
-        test_backend_chapter_content()
-    
-    # TTS service tests
+    if not backend_ok:
+        print_summary()
+        return 1
+
     tts_ok = test_tts_health()
-    if tts_ok:
-        test_tts_voices()
-        audio_url = test_tts_synthesize()
-        if audio_url:
-            test_audio_url_accessible(audio_url)
-    
-    # Integration tests
-    if backend_ok:
-        test_backend_calls_tts()
-        test_audio_status_endpoint()
-        test_r2_audio_config()
-        
-        # Full generation test (optional)
-        if run_full_gen:
-            test_full_audio_generation()
-        else:
-            print("\n    💡 Run with --full flag to test complete audio generation")
-    
+    test_tts_voices()
+    novels = test_novel_listing()
+
+    slug = args.slug or (novels[0]["slug"] if novels else None)
+    if not slug:
+        test_skipped("Audio status", "no local novels found")
+        print_summary()
+        return 0 if tts_ok else 1
+
+    test_audio_status(slug, args.chapter)
+
+    if args.full:
+        test_full_audio_generation(slug, args.chapter)
+    else:
+        test_skipped("Full audio generation", "run with --full to synthesize a chapter")
+
     print_summary()
-    
     return 0 if failed_count == 0 else 1
 
 

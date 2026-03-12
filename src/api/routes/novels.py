@@ -1,25 +1,71 @@
-"""  # pyright: ignore[reportImportCycles]
-Novels API routes
-FIXED: Removed auto-sync from list_novels to prevent DB overload
-"""
+"""Novels API routes."""
 
+import asyncio
 import os
 import re
 import logging
 from pathlib import Path
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from typing import Optional, List
 
 from ..database import get_db, dict_from_row, list_from_rows, db_execute
-from ..models.schemas import NovelResponse, NovelListResponse, NovelCreate
+from ..config import NOVEL_OUTPUT_DIR
+from ..models.schemas import NovelResponse, NovelListResponse, NovelCreate, NovelUpdateRequest
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # Base directory for scraped data
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-DATA_DIR = BASE_DIR / "data" / "output"
+DATA_DIR = NOVEL_OUTPUT_DIR
+
+
+def slugify(value: str) -> str:
+    slug = value.lower().replace(" ", "-")
+    return re.sub(r"[^a-z0-9-]", "", slug)
+
+
+def sanitize_folder_name(value: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*]+', "", value).strip()
+    return cleaned or "Imported Novel"
+
+
+def title_from_folder_name(folder_name: str) -> str:
+    title = re.sub(r"[_-]+", " ", folder_name).strip()
+    return title or "Imported Novel"
+
+
+def parse_uploaded_chapter_number(filename: str) -> Optional[int]:
+    stem = Path(filename).stem.lower()
+    for pattern in (r"chapter[\s_-]*(\d+)", r"^(\d+)", r"(\d+)"):
+        match = re.search(pattern, stem)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def chapter_title_from_filename(filename: str, chapter_number: int) -> str:
+    stem = Path(filename).stem
+    cleaned = re.sub(r"(?i)^chapter[\s_-]*\d+[\s_-]*", "", stem).strip(" -_")
+    if cleaned:
+        cleaned = re.sub(r"[_-]+", " ", cleaned).strip()
+        return f"Chapter {chapter_number}: {cleaned.title()}"
+    return f"Chapter {chapter_number}"
+
+
+def normalize_uploaded_chapter_content(raw_text: str, default_title: str) -> tuple[str, str]:
+    normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return default_title, default_title
+
+    lines = normalized.split("\n")
+    if len(lines) >= 3 and re.fullmatch(r"=+", lines[1].strip()):
+        title = lines[0].strip() or default_title
+        body = "\n".join(lines[2:]).strip()
+        return title, body or title
+
+    return default_title, normalized
 
 
 def scan_novels_from_filesystem():
@@ -37,8 +83,7 @@ def scan_novels_from_filesystem():
             
             if chapter_count > 0:
                 # Create slug from folder name
-                slug = folder.name.lower().replace(' ', '-')
-                slug = re.sub(r'[^a-z0-9-]', '', slug)
+                slug = slugify(folder.name)
                 
                 # Get last modified time
                 latest_file = max(chapter_files, key=lambda f: f.stat().st_mtime)
@@ -51,6 +96,7 @@ def scan_novels_from_filesystem():
                     'genres': 'Fantasy,Action',  # Default genres
                     'chapter_count': chapter_count,
                     'data_path': str(folder),
+                    'source_toc_url': None,
                     'last_updated': last_updated
                 })
     
@@ -80,13 +126,78 @@ def sync_novels_to_db():
             else:
                 # Insert new novel
                 cursor.execute('''
-                    INSERT INTO novels (slug, title, description, genres, chapter_count, data_path, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO novels (slug, title, description, genres, chapter_count, data_path, source_toc_url, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (novel['slug'], novel['title'], novel['description'],
                       novel['genres'], novel['chapter_count'], novel['data_path'],
+                      novel.get('source_toc_url'),
                       novel['last_updated']))
     
     return len(novels)
+
+
+def upsert_novel_record(
+    *,
+    slug: str,
+    title: str,
+    description: Optional[str],
+    genres: Optional[str],
+    data_path: str,
+    source_toc_url: Optional[str],
+    cover_url: Optional[str] = None,
+    chapter_count: Optional[int] = None,
+) -> dict:
+    last_updated = datetime.utcnow()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM novels WHERE slug = ?", (slug,))
+        existing = cursor.fetchone()
+
+        if existing:
+            cursor.execute(
+                """
+                UPDATE novels
+                SET title = ?, description = ?, cover_url = ?, genres = ?,
+                    chapter_count = COALESCE(?, chapter_count),
+                    data_path = ?, source_toc_url = COALESCE(?, source_toc_url),
+                    last_updated = ?
+                WHERE slug = ?
+                """,
+                (
+                    title,
+                    description,
+                    cover_url,
+                    genres,
+                    chapter_count,
+                    data_path,
+                    source_toc_url,
+                    last_updated,
+                    slug,
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO novels
+                    (slug, title, description, cover_url, genres, chapter_count, data_path, source_toc_url, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    slug,
+                    title,
+                    description,
+                    cover_url,
+                    genres,
+                    chapter_count or 0,
+                    data_path,
+                    source_toc_url,
+                    last_updated,
+                ),
+            )
+
+        cursor.execute("SELECT * FROM novels WHERE slug = ?", (slug,))
+        return dict_from_row(cursor.fetchone())
 
 
 @router.get("", response_model=NovelListResponse)
@@ -122,7 +233,7 @@ async def list_novels(
             novels = list_from_rows(cursor.fetchall())
             
             # Get total count
-            count_query = 'SELECT COUNT(*) FROM novels WHERE 1=1'
+            count_query = 'SELECT COUNT(*) AS count FROM novels WHERE 1=1'
             count_params = []
             if search:
                 count_query += ' AND title LIKE ?'
@@ -209,10 +320,10 @@ async def create_novel(novel: NovelCreate):
             raise HTTPException(status_code=409, detail="Novel already exists")
         
         cursor.execute('''
-            INSERT INTO novels (slug, title, description, cover_url, genres, chapter_count, data_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO novels (slug, title, description, cover_url, genres, chapter_count, data_path, source_toc_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (novel.slug, novel.title, novel.description, novel.cover_url, 
-              novel.genres, 0, novel.data_path))
+              novel.genres, 0, novel.data_path, novel.source_toc_url))
         
         conn.commit()
         
@@ -240,21 +351,126 @@ async def sync_novels():
         raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 
+@router.post("/import-folder")
+async def import_novel_folder(
+    files: List[UploadFile] = File(...),
+    folder_name: Optional[str] = Form(None),
+    title: Optional[str] = Form(None),
+):
+    """Import a local folder of chapter text files into the configured novel output root and sync it to SQLite."""
+    text_files = [file for file in files if file.filename and file.filename.lower().endswith(".txt")]
+    if not text_files:
+        raise HTTPException(status_code=400, detail="No .txt chapter files were uploaded")
+
+    detected_folder_name = folder_name
+    if not detected_folder_name:
+        first_name = text_files[0].filename.replace("\\", "/")
+        first_parts = [part for part in first_name.split("/") if part]
+        detected_folder_name = first_parts[0] if len(first_parts) > 1 else Path(first_name).stem
+
+    safe_folder_name = sanitize_folder_name(detected_folder_name or "Imported Novel")
+    novel_title = (title or title_from_folder_name(detected_folder_name or safe_folder_name)).strip()
+    novel_slug = slugify(novel_title) or slugify(safe_folder_name) or "imported-novel"
+    target_dir = DATA_DIR / safe_folder_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    parsed_entries = []
+    for upload in text_files:
+        parsed_entries.append({
+            "upload": upload,
+            "filename": upload.filename.replace("\\", "/"),
+            "parsed_number": parse_uploaded_chapter_number(upload.filename),
+        })
+
+    parsed_entries.sort(key=lambda item: (item["parsed_number"] is None, item["parsed_number"] or 10**9, item["filename"].lower()))
+
+    existing = None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, data_path FROM novels WHERE slug = ?", (novel_slug,))
+        existing = dict_from_row(cursor.fetchone())
+        if existing:
+            cursor.execute("DELETE FROM chapters WHERE novel_id = ?", (existing["id"],))
+
+    for existing_file in target_dir.glob("Chapter_*.txt"):
+        existing_file.unlink()
+
+    imported_count = 0
+    used_numbers = set()
+    next_auto_number = 1
+
+    for entry in parsed_entries:
+        upload = entry["upload"]
+        raw_bytes = await upload.read()
+        try:
+            raw_text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raw_text = raw_bytes.decode("utf-8-sig", errors="ignore")
+
+        chapter_number = entry["parsed_number"]
+        if chapter_number is None or chapter_number in used_numbers:
+            while next_auto_number in used_numbers:
+                next_auto_number += 1
+            chapter_number = next_auto_number
+
+        used_numbers.add(chapter_number)
+        next_auto_number = max(next_auto_number, chapter_number + 1)
+
+        default_title = chapter_title_from_filename(entry["filename"], chapter_number)
+        chapter_title, chapter_body = normalize_uploaded_chapter_content(raw_text, default_title)
+        formatted_content = f"{chapter_title}\n============================================================\n\n{chapter_body.strip()}\n"
+
+        chapter_path = target_dir / f"Chapter_{chapter_number:04d}.txt"
+        chapter_path.write_text(formatted_content, encoding="utf-8")
+        imported_count += 1
+
+    novel_record = upsert_novel_record(
+        slug=novel_slug,
+        title=novel_title,
+        description=f"Imported locally from folder '{safe_folder_name}'",
+        genres="Imported,Local",
+        data_path=str(target_dir),
+        source_toc_url=None,
+        chapter_count=imported_count,
+    )
+
+    from .chapters import sync_chapters_for_novel
+
+    synced_count = sync_chapters_for_novel(novel_record["id"], str(target_dir))
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE novels
+            SET chapter_count = ?, last_updated = ?
+            WHERE id = ?
+            """,
+            (synced_count, datetime.utcnow(), novel_record["id"]),
+        )
+        cursor.execute("SELECT * FROM novels WHERE id = ?", (novel_record["id"],))
+        refreshed = dict_from_row(cursor.fetchone())
+
+    return {
+        "message": f"Imported {synced_count} chapters from local folder",
+        "novel": refreshed,
+        "chapters_imported": synced_count,
+        "folder_name": safe_folder_name,
+        "replaced_existing": bool(existing),
+    }
+
+
 @router.post("/{slug}/update")
-async def update_novel(slug: str):
+async def update_novel(slug: str, request: Optional[NovelUpdateRequest] = None):
     """Check for missing chapters and scrape them"""
-    import sys
     import threading
     import uuid
     
     # Check if scraper dependencies are available
-    from .scraper import check_scraper_available
+    from .scraper import check_scraper_available, scrape_jobs, run_scraper_job
     check_scraper_available()  # Returns 503 if deps not installed
     
-    # Add scraper to path
-    sys.path.insert(0, str(BASE_DIR / "src"))
     from scraper import NovelScraper
-    from .scraper import scrape_jobs, run_scraper
     
     # Get novel from DB
     with get_db() as conn:
@@ -266,9 +482,30 @@ async def update_novel(slug: str):
             raise HTTPException(status_code=404, detail="Novel not found")
     
     data_path = Path(novel['data_path']) if novel.get('data_path') else None
-    
+    source_toc_url = novel.get('source_toc_url')
+    provided_source_toc_url = (request.toc_url or '').strip() if request else ''
+
+    if provided_source_toc_url and provided_source_toc_url != source_toc_url:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE novels
+                SET source_toc_url = ?, last_updated = ?
+                WHERE slug = ?
+                """,
+                (provided_source_toc_url, datetime.utcnow(), slug),
+            )
+        source_toc_url = provided_source_toc_url
+        novel['source_toc_url'] = provided_source_toc_url
+
     if not data_path or not data_path.exists():
         raise HTTPException(status_code=400, detail="Novel data path not found")
+    if not source_toc_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Novel source URL not found. Paste the novel TOC URL on the novel page and try again.",
+        )
     
     # Get existing chapter numbers from filesystem
     existing_chapters = set()
@@ -280,18 +517,9 @@ async def update_novel(slug: str):
     if not existing_chapters:
         raise HTTPException(status_code=400, detail="No existing chapters found")
     
-    # Detect total chapters from website
-    # Use folder name which matches the original URL format
-    folder_name = data_path.name  # This is the cleaned novel name from scraping
-    toc_url = f"https://novelhi.com/s/{folder_name}"
-    
     try:
         scraper = NovelScraper(headless=True)
-        driver = scraper.start_driver()
-        try:
-            total_chapters = scraper.get_total_chapters(driver, toc_url)
-        finally:
-            driver.quit()
+        total_chapters = await asyncio.to_thread(scraper.get_total_chapters, source_toc_url)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to detect chapters: {str(e)}")
     
@@ -319,13 +547,15 @@ async def update_novel(slug: str):
         'current_chapter': 0,
         'total_chapters': len(missing_chapters),
         'novel_title': novel['title'],
+        'persisted': False,
         'error': None
     }
     
     # Start scraper in background
     thread = threading.Thread(
-        target=run_scraper,
-        args=(job_id, toc_url, start_chapter, end_chapter)
+        target=run_scraper_job,
+        args=(job_id, source_toc_url, start_chapter, end_chapter),
+        daemon=True,
     )
     thread.start()
     

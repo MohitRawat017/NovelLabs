@@ -1,8 +1,34 @@
+/* Global Reading Base */
 .reader {
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-    background: var(--bg-primary);
+    /* The background is handled by the novel-detail-bg-underlay fixed component */
+    color: var(--text-primary);
+    position: relative;
+    z-index: 10;
+}
+
+/* Background Image Strategy */
+.chapter-bg-underlay {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+    transition: background-image 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html:not(.dark) .chapter-base-bg {
+    background-image: url('/reference/light/chapter/light_chapter_background.png');
+    opacity: 1; /* Keep at full strength for the new artwork */
+}
+
+html.dark .chapter-base-bg {
+    background-image: url('/reference/dark/chapter/dark_chapter_background.png');
+    opacity: 1;
 }
 
 /* Loading & Error States */
@@ -13,12 +39,8 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: var(--space-md);
+    gap: 1rem;
     color: var(--text-muted);
-}
-
-.error-state h2 {
-    color: var(--error);
 }
 
 .spinner,
@@ -27,94 +49,26 @@
 }
 
 @keyframes spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
 
-/* Reader Header */
-.reader-header {
-    position: sticky;
-    top: 0;
-    z-index: var(--z-sticky);
+/* Reader Actions Mobile Menu */
+.reader-action-menu {
+    position: absolute;
+    top: calc(100% + 0.5rem);
+    right: 0;
+    min-width: 180px;
+    padding: 0.5rem;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-md) var(--space-lg);
+    flex-direction: column;
+    gap: 0.25rem;
     background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border-color);
-}
-
-.chapter-nav {
-    display: flex;
-    align-items: center;
-    gap: var(--space-md);
-}
-
-.chapter-indicator {
-    font-weight: 500;
-    color: var(--text-primary);
-    padding: 0 var(--space-md);
-}
-
-/* Reader Content */
-.reader-content {
-    flex: 1;
-    max-width: 800px;
-    margin: 0 auto;
-    padding: var(--space-2xl) var(--space-lg);
-    width: 100%;
-}
-
-.chapter-title {
-    font-size: 1.75rem;
-    font-weight: 600;
-    margin-bottom: var(--space-xl);
-    text-align: center;
-    color: var(--accent-primary);
-}
-
-.chapter-text {
-    font-family: var(--font-serif);
-    font-size: 1.125rem;
-    line-height: 1.9;
-    color: var(--text-secondary);
-}
-
-.chapter-text p {
-    margin-bottom: var(--space-lg);
-    text-indent: 2em;
-}
-
-.chapter-text p:first-of-type {
-    text-indent: 0;
-}
-
-/* Reader Footer */
-.reader-footer {
-    padding: var(--space-xl) var(--space-lg);
-    background: var(--bg-secondary);
-    border-top: 1px solid var(--border-color);
-}
-
-.reader-footer .chapter-nav {
-    justify-content: center;
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-    .reader-header {
-        padding: var(--space-sm) var(--space-md);
-    }
-    .reader-content {
-        padding: var(--space-xl) var(--space-md);
-    }
-    .chapter-text {
-        font-size: 1rem;
-    }
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    z-index: 50;
+    backdrop-filter: blur(16px);
 }
 
 /* Karaoke-style chunk highlighting */
@@ -122,61 +76,70 @@
     transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     padding: 0.5rem 1rem;
     margin: 0.75rem -1rem;
-    border-radius: 8px;
+    border-radius: 12px;
     border-left: 4px solid transparent;
     position: relative;
     text-indent: 0 !important;
     scroll-margin-top: 150px; /* Offset for fixed header */
 }
 
-.chunk-active {
+/* Light Mode active chunk (Soft Violet Glow) */
+html:not(.dark) .chunk-active {
     background: linear-gradient(90deg,
-            rgba(255, 200, 87, 0.25) 0%,
-            rgba(255, 200, 87, 0.15) 50%,
-            rgba(255, 200, 87, 0.05) 100%);
-    border-left-color: #FFC857;
+            rgba(139, 92, 246, 0.15) 0%,
+            rgba(139, 92, 246, 0.05) 50%,
+            transparent 100%);
+    border-left-color: #8b5cf6;
     box-shadow: 
-        0 0 40px rgba(255, 200, 87, 0.2),
-        0 4px 20px rgba(255, 200, 87, 0.1);
+        0 0 30px rgba(139, 92, 246, 0.1),
+        0 4px 15px rgba(139, 92, 246, 0.05);
     transform: translateX(4px);
-    color: var(--text-primary);
+    color: #4c1d95; /* Deep purple text for high contrast */
+    font-weight: 500;
+}
+
+/* Dark Mode active chunk (Emerald/Cyan Glow) */
+html.dark .chunk-active {
+    background: linear-gradient(90deg,
+            rgba(16, 185, 129, 0.15) 0%,
+            rgba(16, 185, 129, 0.05) 50%,
+            transparent 100%);
+    border-left-color: #10b981;
+    box-shadow: 
+        0 0 30px rgba(16, 185, 129, 0.15),
+        0 4px 15px rgba(16, 185, 129, 0.05);
+    transform: translateX(4px);
+    color: #a7f3d0; /* Bright emerald tint for text */
 }
 
 /* Pulse animation for active chunk */
-@keyframes pulse-highlight {
-    0% {
-        box-shadow: 
-            0 0 40px rgba(255, 200, 87, 0.2),
-            0 4px 20px rgba(255, 200, 87, 0.1);
-    }
-    50% {
-        box-shadow: 
-            0 0 50px rgba(255, 200, 87, 0.3),
-            0 6px 25px rgba(255, 200, 87, 0.15);
-    }
-    100% {
-        box-shadow: 
-            0 0 40px rgba(255, 200, 87, 0.2),
-            0 4px 20px rgba(255, 200, 87, 0.1);
-    }
+@keyframes pulse-highlight-light {
+    0% { box-shadow: 0 0 30px rgba(139, 92, 246, 0.1); }
+    50% { box-shadow: 0 0 40px rgba(139, 92, 246, 0.2); }
+    100% { box-shadow: 0 0 30px rgba(139, 92, 246, 0.1); }
 }
 
-.chunk-active {
-    animation: pulse-highlight 2s ease-in-out infinite;
+@keyframes pulse-highlight-dark {
+    0% { box-shadow: 0 0 30px rgba(16, 185, 129, 0.15); }
+    50% { box-shadow: 0 0 45px rgba(16, 185, 129, 0.25); }
+    100% { box-shadow: 0 0 30px rgba(16, 185, 129, 0.15); }
 }
 
-/* Optional: Add a subtle indicator before active chunk */
-.chunk-active::before {
-    content: '';
-    position: absolute;
-    left: -4px;
-    top: 0;
-    bottom: 0;
-    width: 4px;
-    background: linear-gradient(180deg, 
-        #FFC857 0%, 
-        rgba(255, 200, 87, 0.5) 100%);
-    border-radius: 4px;
+html:not(.dark) .chunk-active {
+    animation: pulse-highlight-light 3s ease-in-out infinite;
+}
+
+html.dark .chunk-active {
+    animation: pulse-highlight-dark 3s ease-in-out infinite;
+}
+
+/* Distinguish between paragraph chunks and segments */
+.chunk-paragraph {
+    margin-bottom: 1.2em;
+}
+
+.chunk-segment {
+    margin-bottom: 0.4em;
 }
 
 /* Smooth scroll behavior for the entire page */
@@ -187,45 +150,4 @@ html {
 /* Override scroll behavior when audio is playing */
 .reader.audio-active {
     scroll-behavior: smooth;
-}
-
-/* Add these styles to your ChapterReader.css file */
-
-/* Distinguish between paragraph chunks and segments */
-.chunk-paragraph {
-    margin-bottom: 1em;
-}
-
-.chunk-segment {
-    margin-bottom: 0.5em;
-}
-
-/* Make sure active chunk stands out during audio playback */
-.chunk-active {
-    background: linear-gradient(90deg, 
-        rgba(59, 130, 246, 0.1) 0%, 
-        rgba(59, 130, 246, 0.05) 100%
-    );
-    border-left: 3px solid rgb(59, 130, 246);
-    padding-left: 1rem;
-    margin-left: -1rem;
-    transition: all 0.3s ease;
-    border-radius: 4px;
-}
-
-/* Optional: Add subtle visual indicator for segment continuations */
-.chunk-segment:not(:first-child)::before {
-    content: '';
-    display: inline-block;
-    width: 4px;
-    height: 4px;
-    background: rgba(0, 0, 0, 0.1);
-    border-radius: 50%;
-    margin-right: 8px;
-    vertical-align: middle;
-}
-
-/* Ensure smooth transitions */
-.chunk {
-    transition: background 0.3s ease, border 0.3s ease;
 }

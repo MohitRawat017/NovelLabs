@@ -1,173 +1,43 @@
-.scraper {
-    padding: var(--space-2xl) 0;
-    min-height: calc(100vh - 70px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+/* Background Image Strategy (Mirroring Library) */
+.scraper-bg-underlay {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
 }
 
-.scraper-container {
-    max-width: 500px;
-    width: 100%;
-    padding: 0 var(--space-lg);
+/* Base Light background */
+.scraper-base-bg {
+  background-image: url('/reference/light/library_background.png');
 }
 
-.scraper-header {
-    text-align: center;
-    margin-bottom: var(--space-xl);
-}
-
-.scraper-icon {
-    width: 80px;
-    height: 80px;
-    margin: 0 auto var(--space-lg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--accent-glow);
-    border-radius: var(--radius-xl);
-    color: var(--accent-primary);
-}
-
-.scraper-header h1 {
-    margin-bottom: var(--space-xs);
-}
-
-/* Form */
-.scraper-form {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: var(--space-xl);
-}
-
-.form-group {
-    margin-bottom: var(--space-lg);
-}
-
-.form-group label {
-    display: block;
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: var(--text-primary);
-    margin-bottom: var(--space-sm);
-}
-
-.form-hint {
-    display: block;
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    margin-top: var(--space-xs);
-}
-
-.optional-tag {
-    font-weight: 400;
-    font-size: 0.8rem;
-    color: var(--text-muted);
-}
-
-.form-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-md);
-}
-
-.btn-large {
-    width: 100%;
-    padding: var(--space-md) var(--space-lg);
-    font-size: 1rem;
+/* Dark mode override */
+.dark .scraper-base-bg {
+  /* Utilizing the exact typo provided by user for the dark mode asset */
+  background-image: url('/reference/dark/library_backgound.png');
 }
 
 .spin {
-    animation: spin 1s linear infinite;
+  animation: spin 1s linear infinite;
 }
 
 @keyframes spin {
-    from {
-        transform: rotate(0deg);
-    }
+  from {
+      transform: rotate(0deg);
+  }
 
-    to {
-        transform: rotate(360deg);
-    }
-}
-
-/* Error Box */
-.error-box {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
-    padding: var(--space-md);
-    background: rgba(245, 101, 101, 0.1);
-    border: 1px solid var(--error);
-    border-radius: var(--radius-md);
-    color: var(--error);
-    margin-bottom: var(--space-lg);
-    font-size: 0.9rem;
-}
-
-/* Progress Section */
-.progress-section {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    padding: var(--space-xl);
-    text-align: center;
-}
-
-.progress-header {
-    margin-bottom: var(--space-xl);
-}
-
-.progress-header svg {
-    margin-bottom: var(--space-md);
-}
-
-.progress-header h2 {
-    margin-bottom: var(--space-sm);
+  to {
+      transform: rotate(360deg);
+  }
 }
 
 .success-icon {
-    color: var(--success);
+  color: #10b981; /* Tailwind emerald-500 */
 }
 
 .error-icon {
-    color: var(--error);
-}
-
-.novel-title {
-    color: var(--accent-primary);
-    font-weight: 500;
-    margin: 0;
-}
-
-.progress-bar {
-    height: 12px;
-    background: var(--bg-tertiary);
-    border-radius: var(--radius-full);
-    overflow: hidden;
-    margin-bottom: var(--space-md);
-}
-
-.progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, var(--accent-primary), var(--accent-hover));
-    border-radius: var(--radius-full);
-    transition: width var(--transition-normal);
-}
-
-.progress-text {
-    font-size: 0.9rem;
-    color: var(--text-muted);
-    margin: 0 0 var(--space-xl);
-}
-
-.progress-actions {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-md);
-}
-
-.progress-actions .btn {
-    width: 100%;
+  color: #ef4444; /* Tailwind red-500 */
 }

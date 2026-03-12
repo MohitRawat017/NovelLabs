@@ -1,17 +1,32 @@
-# Scraping
-beautifulsoup4>=4.12.3
-cloudscraper>=1.2.71
+# =====================
+# NovelLabs Audiobook Generator
+# =====================
 
 # Web backend
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.5.0
 httpx>=0.27.0
+python-multipart>=0.0.9
 
 # Database and config
 python-dotenv>=1.0.0
 sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.9
 
-# Cloud storage
-boto3>=1.34.0
+# Local TTS - Kokoro (default)
+numpy>=2.0.0
+soundfile>=0.13.1
+kokoro
+torch>=2.5.0
+
+# =====================
+# Optional Dependencies
+# =====================
+
+# Web Scraper (uncomment to enable scraping)
+# selenium
+# undetected-chromedriver
+# beautifulsoup4
+
+# Qwen3 TTS (uncomment for voice cloning support)
+# faster-qwen3-tts

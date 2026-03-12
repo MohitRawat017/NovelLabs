@@ -6,7 +6,6 @@ import './AudioPlayer.css';
 function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
     const audioRef = useRef(null);
     const pollIntervalRef = useRef(null);
-    const pollTimeoutRef = useRef(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [audioReady, setAudioReady] = useState(false);
@@ -19,6 +18,15 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     const [isMinimized, setIsMinimized] = useState(false);
     const [error, setError] = useState(null);
     const [generationStatus, setGenerationStatus] = useState(null);
+    const [generationInfo, setGenerationInfo] = useState(null);
+
+    const isAudioAvailable = useCallback((status) => (
+        Boolean(status?.exists || status?.audio_only || status?.status === 'completed')
+    ), []);
+
+    const isGenerationActive = useCallback((status) => (
+        Boolean(status?.generating || status?.status === 'generating' || status?.job_status === 'generating')
+    ), []);
 
     const loadAudio = useCallback((slug, chapter) => {
         const url = `${getAudioStreamUrl(slug, chapter)}?t=${Date.now()}`;
@@ -26,6 +34,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         setAudioReady(true);
         setIsLoading(false);
         setGenerationStatus(null);
+        setGenerationInfo(null);
         if (onAudioReady) {
             setTimeout(() => onAudioReady(), 500);
         }
@@ -36,11 +45,49 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             clearInterval(pollIntervalRef.current);
             pollIntervalRef.current = null;
         }
-        if (pollTimeoutRef.current) {
-            clearTimeout(pollTimeoutRef.current);
-            pollTimeoutRef.current = null;
-        }
     }, []);
+
+    const buildGenerationMessage = useCallback((status) => {
+        if (!status) {
+            return null;
+        }
+        if (status.message) {
+            return status.message;
+        }
+        if (status.completed_chunks && status.total_chunks) {
+            return `Processed ${status.completed_chunks} of ${status.total_chunks} chunks`;
+        }
+        if (isGenerationActive(status)) {
+            return 'Generating audio...';
+        }
+        return null;
+    }, [isGenerationActive]);
+
+    const applyStatus = useCallback((status) => {
+        setGenerationInfo(status || null);
+
+        if (isAudioAvailable(status)) {
+            loadAudio(novelSlug, chapterNumber);
+            return 'ready';
+        }
+
+        if (status?.error) {
+            setError(status.error);
+            setGenerationStatus(null);
+            setIsLoading(false);
+            return 'error';
+        }
+
+        if (isGenerationActive(status)) {
+            setGenerationStatus(buildGenerationMessage(status));
+            setIsLoading(false);
+            return 'generating';
+        }
+
+        setGenerationStatus(null);
+        setIsLoading(false);
+        return 'idle';
+    }, [buildGenerationMessage, chapterNumber, isAudioAvailable, isGenerationActive, loadAudio, novelSlug]);
 
     // Cleanup polling on unmount
     useEffect(() => {
@@ -66,16 +113,9 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
 
         try {
             const status = await getAudioStatus(novelSlug, chapterNumber);
-
-            if (status.exists) {
-                loadAudio(novelSlug, chapterNumber);
-            } else if (status.generating) {
-                setGenerationStatus('Generating audio...');
-                setIsLoading(false);
+            const state = applyStatus(status);
+            if (state === 'generating') {
                 pollForCompletion();
-            } else {
-                setIsLoading(false);
-                setGenerationStatus(null);
             }
         } catch (err) {
             console.error('Audio check error:', err);
@@ -96,8 +136,18 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             if (data.status === 'exists') {
                 loadAudio(novelSlug, chapterNumber);
             } else if (data.status === 'queued' || data.status === 'already_generating') {
-                setGenerationStatus('Generating audio with Kokoro TTS...');
-                pollForCompletion();
+                const status = await getAudioStatus(novelSlug, chapterNumber).catch(() => null);
+                if (status) {
+                    const state = applyStatus(status);
+                    if (state !== 'ready') {
+                        pollForCompletion();
+                    }
+                } else {
+                    setGenerationInfo((previous) => previous || { progress: 0 });
+                    setGenerationStatus(data.message || 'Generating audio...');
+                    setIsLoading(false);
+                    pollForCompletion();
+                }
             } else {
                 setError(data.message || 'Generation failed');
                 setIsLoading(false);
@@ -115,14 +165,9 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         pollIntervalRef.current = setInterval(async () => {
             try {
                 const status = await getAudioStatus(novelSlug, chapterNumber);
-
-                if (status.exists) {
+                const state = applyStatus(status);
+                if (state === 'ready' || state === 'error' || state === 'idle') {
                     stopPolling();
-                    loadAudio(novelSlug, chapterNumber);
-                } else if (status.error) {
-                    stopPolling();
-                    setError(status.error);
-                    setIsLoading(false);
                 }
             } catch {
                 stopPolling();
@@ -130,9 +175,6 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                 setIsLoading(false);
             }
         }, 2000);
-
-        // Timeout after 5 minutes
-        pollTimeoutRef.current = setTimeout(() => stopPolling(), 300000);
     };
 
     // Audio event handlers
@@ -217,32 +259,47 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     };
 
     const formatTime = (seconds) => {
-        if (!seconds || isNaN(seconds)) return '0:00';
+        if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '0:00';
         const mins = Math.floor(seconds / 60);
         const secs = Math.floor(seconds % 60);
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
+    const generationProgress = Math.max(0, Math.min(100, generationInfo?.progress || 0));
+    const activeChunk = generationInfo?.current_chunk || generationInfo?.completed_chunks || 0;
+    const totalChunks = generationInfo?.total_chunks || 0;
+    const progressCaption = totalChunks
+        ? `${Math.min(generationInfo?.completed_chunks || 0, totalChunks)} / ${totalChunks} chunks processed`
+        : 'Waiting for chunk progress...';
+
     if (isMinimized) {
         return (
-            <div className="audio-player-mini">
-                <button className="mini-expand" onClick={() => setIsMinimized(false)}>
-                    <ChevronUp size={16} />
+            <div className="fixed bottom-4 md:bottom-8 right-4 md:right-8 z-[100] flex items-center gap-3 p-2 pr-4 glass rounded-full border border-white/20 dark:border-white/10 shadow-2xl animate-in slide-in-from-bottom-5">
+                <button 
+                    className="w-10 h-10 rounded-full flex items-center justify-center bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 transition-all text-stone-600 dark:text-stone-300 border border-stone-200/50 dark:border-white/10" 
+                    onClick={() => setIsMinimized(false)}
+                >
+                    <ChevronUp size={18} />
                 </button>
-                <span className="mini-title">{chapterTitle || `Chapter ${chapterNumber}`}</span>
+                <div className="flex flex-col">
+                    <span className="text-xs font-bold uppercase tracking-widest text-violet-600 dark:text-violet-400">Playing</span>
+                    <span className="text-sm font-medium text-stone-800 dark:text-stone-200 max-w-[120px] truncate">
+                        {chapterTitle || `Chapter ${chapterNumber}`}
+                    </span>
+                </div>
                 <button
-                    className="mini-play"
+                    className={`w-10 h-10 ml-2 rounded-full flex items-center justify-center transition-all shadow-md text-white ${audioReady ? 'bg-gradient-to-r from-violet-500 to-indigo-500 hover:scale-105' : 'bg-stone-400 dark:bg-stone-600 cursor-not-allowed hidden'}`}
                     onClick={togglePlay}
                     disabled={!audioReady}
                 >
-                    {isPlaying ? <Pause size={18} /> : <Play size={18} />}
+                    {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-1" />}
                 </button>
             </div>
         );
     }
 
     return (
-        <div className="audio-player">
+        <div className="fixed bottom-4 md:bottom-8 right-4 md:right-8 z-[100] w-[calc(100%-32px)] md:w-[360px] glass rounded-[32px] overflow-hidden border border-white/20 dark:border-white/10 shadow-2xl flex flex-col animate-in slide-in-from-bottom-8">
             {audioUrl && (
                 <audio
                     ref={audioRef}
@@ -252,72 +309,134 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                 />
             )}
 
-            <div className="audio-player-header">
-                <span className="audio-player-title">
-                    {chapterTitle || `Chapter ${chapterNumber}`}
-                </span>
-                <div className="audio-player-actions">
-                    <button className="btn-icon" onClick={() => setIsMinimized(true)}>
+            <div className="flex items-center justify-between p-4 md:p-5 border-b border-stone-200/50 dark:border-white/10 bg-white/40 dark:bg-black/20">
+                <div className="flex flex-col">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-violet-600 dark:text-violet-400 mb-0.5">Audio Player</span>
+                    <span className="text-sm font-medium text-stone-800 dark:text-stone-200 truncate max-w-[200px]">
+                        {chapterTitle || `Chapter ${chapterNumber}`}
+                    </span>
+                </div>
+                <div className="flex gap-1">
+                    <button 
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-stone-500 hover:bg-white/50 dark:hover:bg-white/10 transition-all" 
+                        onClick={() => setIsMinimized(true)}
+                    >
                         <ChevronDown size={16} />
                     </button>
-                    <button className="btn-icon" onClick={onClose}>
+                    <button 
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-stone-500 hover:bg-white/50 dark:hover:bg-white/10 transition-all" 
+                        onClick={onClose}
+                    >
                         <X size={16} />
                     </button>
                 </div>
             </div>
 
-            {isLoading ? (
-                <div className="audio-player-loading">
-                    <Loader size={24} className="spin" />
-                    <span>{generationStatus || 'Loading audio...'}</span>
-                </div>
-            ) : error ? (
-                <div className="audio-player-error">
-                    <span>{error}</span>
-                    <button className="btn btn-sm" onClick={checkAudioStatus}>
-                        Retry
-                    </button>
-                </div>
-            ) : !audioReady ? (
-                <div className="audio-player-loading">
-                    <span>Audio not generated yet</span>
-                    <button className="btn btn-primary" onClick={startAudioGeneration}>
-                        Generate Audio
-                    </button>
-                </div>
-            ) : (
-                <>
-                    <div className="audio-progress" onClick={handleSeek}>
-                        <div
-                            className="audio-progress-bar"
-                            style={{ width: `${progress}%` }}
-                        />
+            <div className="p-5 flex flex-col">
+                {isLoading ? (
+                    <div className="flex flex-col items-center justify-center py-8 gap-3 text-stone-500 dark:text-stone-400">
+                        <Loader size={24} className="spin text-violet-500" />
+                        <span className="text-sm font-medium">{generationStatus || 'Loading audio...'}</span>
                     </div>
-
-                    <div className="audio-times">
-                        <span>{formatTime(currentTime)}</span>
-                        <span>{formatTime(duration)}</span>
-                    </div>
-
-                    <div className="audio-controls">
-                        <button className="btn-icon" onClick={toggleMute}>
-                            {isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                ) : error ? (
+                    <div className="flex flex-col items-center justify-center py-6 gap-3 text-red-500 text-center">
+                        <span className="text-sm font-medium flex-1 px-4">{error}</span>
+                        <button className="px-4 py-2 mt-2 rounded-xl text-xs font-bold bg-white/50 dark:bg-white/10 hover:bg-white/80 dark:hover:bg-white/20 text-stone-700 dark:text-stone-300 transition-all border border-stone-200/50 dark:border-white/10" onClick={checkAudioStatus}>
+                            Retry Connection
                         </button>
+                    </div>
+                ) : !audioReady && isGenerationActive(generationInfo) ? (
+                    <div className="flex flex-col gap-4">
+                        <div className="flex items-center gap-2 text-stone-800 dark:text-stone-200 font-medium text-sm">
+                            <Loader size={16} className="spin text-violet-500" />
+                            <span>{generationStatus || 'Generating audio...'}</span>
+                        </div>
 
-                        <button
-                            className="audio-play-btn"
-                            onClick={togglePlay}
-                            disabled={!audioReady}
+                        <div className="h-2 w-full bg-stone-200/50 dark:bg-white/5 rounded-full overflow-hidden">
+                            <div
+                                className="h-full bg-gradient-to-r from-violet-500 to-indigo-500 transition-all duration-300"
+                                style={{ width: `${generationProgress}%` }}
+                            />
+                        </div>
+
+                        <div className="flex justify-between text-xs font-bold text-stone-500 dark:text-stone-400 uppercase tracking-wider">
+                            <span>{progressCaption}</span>
+                            <span className="text-violet-600 dark:text-violet-400">{Math.round(generationProgress)}%</span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 mt-2 border-t border-stone-200/50 dark:border-white/10 pt-4">
+                            <div className="flex flex-col bg-white/40 dark:bg-white/5 p-2 rounded-xl border border-stone-200/50 dark:border-white/5">
+                                <span className="text-[10px] uppercase font-bold text-stone-400">Current Iteration</span>
+                                <span className="text-xs font-medium text-stone-700 dark:text-stone-300">{activeChunk ? `Chunk ${activeChunk}` : 'Preparing...'}</span>
+                            </div>
+                            <div className="flex flex-col bg-white/40 dark:bg-white/5 p-2 rounded-xl border border-stone-200/50 dark:border-white/5">
+                                <span className="text-[10px] uppercase font-bold text-stone-400">Time Elapsed</span>
+                                <span className="text-xs font-medium text-stone-700 dark:text-stone-300">{generationInfo?.elapsed_seconds ? formatTime(generationInfo.elapsed_seconds) : '--:--'}</span>
+                            </div>
+                            <div className="flex flex-col bg-white/40 dark:bg-white/5 p-2 rounded-xl border border-stone-200/50 dark:border-white/5">
+                                <span className="text-[10px] uppercase font-bold text-stone-400">Avg / Chunk</span>
+                                <span className="text-xs font-medium text-stone-700 dark:text-stone-300">{generationInfo?.average_chunk_seconds ? `${generationInfo.average_chunk_seconds.toFixed(1)}s` : '--'}</span>
+                            </div>
+                            <div className="flex flex-col bg-white/40 dark:bg-white/5 p-2 rounded-xl border border-stone-200/50 dark:border-white/5">
+                                <span className="text-[10px] uppercase font-bold text-stone-400">ETA</span>
+                                <span className="text-xs font-medium text-stone-700 dark:text-stone-300">{generationInfo?.estimated_remaining_seconds ? formatTime(generationInfo.estimated_remaining_seconds) : '--:--'}</span>
+                            </div>
+                        </div>
+
+                        <button className="w-full py-2.5 mt-2 rounded-xl text-xs font-bold bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 text-stone-600 dark:text-stone-400 transition-all border border-stone-200/50 dark:border-white/5" onClick={checkAudioStatus}>
+                            Refresh Status
+                        </button>
+                    </div>
+                ) : !audioReady ? (
+                    <div className="flex flex-col items-center justify-center py-6 gap-4">
+                        <span className="text-sm font-medium text-stone-600 dark:text-stone-400">Audio not generated yet</span>
+                        <button className="px-6 py-2.5 rounded-xl text-white font-bold text-sm bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-400 hover:to-indigo-400 shadow-md transition-all" onClick={startAudioGeneration}>
+                            Generate Now
+                        </button>
+                    </div>
+                ) : (
+                    <>
+                        <div 
+                            className="h-2 w-full bg-stone-200/80 dark:bg-white/10 rounded-full overflow-hidden cursor-pointer relative group" 
+                            onClick={handleSeek}
                         >
-                            {isPlaying ? <Pause size={24} /> : <Play size={24} />}
-                        </button>
+                            <div
+                                className="h-full bg-gradient-to-r from-violet-500 to-indigo-500 transition-all duration-100 ease-linear rounded-r-full group-hover:from-violet-400 group-hover:to-indigo-400"
+                                style={{ width: `${progress}%` }}
+                            />
+                        </div>
 
-                        <button className="speed-btn" onClick={changeSpeed}>
-                            {speed}x
-                        </button>
-                    </div>
-                </>
-            )}
+                        <div className="flex justify-between mt-2 text-[11px] font-bold text-stone-500 dark:text-stone-400 tracking-wider">
+                            <span>{formatTime(currentTime)}</span>
+                            <span>{formatTime(duration)}</span>
+                        </div>
+
+                        <div className="flex items-center justify-between mt-6 px-2">
+                            <button 
+                                className="w-10 h-10 rounded-full flex items-center justify-center text-stone-500 hover:bg-white/50 dark:hover:bg-white/10 hover:text-stone-800 dark:hover:text-stone-200 transition-all" 
+                                onClick={toggleMute}
+                            >
+                                {isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                            </button>
+
+                            <button
+                                className={`w-14 h-14 rounded-full flex items-center justify-center transition-all bg-gradient-to-r from-violet-500 to-indigo-500 text-white shadow-lg ${audioReady ? 'hover:scale-105 hover:shadow-violet-500/25' : 'opacity-50 cursor-not-allowed'}`}
+                                onClick={togglePlay}
+                                disabled={!audioReady}
+                            >
+                                {isPlaying ? <Pause size={24} /> : <Play size={24} className="ml-1" />}
+                            </button>
+
+                            <button 
+                                className="w-12 h-8 rounded-xl flex items-center justify-center text-xs font-bold text-stone-600 dark:text-stone-300 bg-white/50 dark:bg-white/5 hover:bg-white/80 dark:hover:bg-white/10 transition-all border border-stone-200/50 dark:border-white/10" 
+                                onClick={changeSpeed}
+                            >
+                                {speed}x
+                            </button>
+                        </div>
+                    </>
+                )}
+            </div>
         </div>
     );
 }

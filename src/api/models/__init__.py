@@ -1,26 +1,5 @@
-"""Models package initialization"""
-from .models import (
-    Base,
-    Novel,
-    Chapter,
-    Segment,
-    UserProgress,
-    UserPreferences,
-    ChapterAudio,
-    AudioTiming,
-    get_engine,
-    get_session
-)
+"""API model package exports."""
 
-__all__ = [
-    "Base",
-    "Novel",
-    "Chapter", 
-    "Segment",
-    "UserProgress",
-    "UserPreferences",
-    "ChapterAudio",
-    "AudioTiming",
-    "get_engine",
-    "get_session"
-]
+from . import schemas
+
+__all__ = ["schemas"]

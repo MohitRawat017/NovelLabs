@@ -1,804 +1,1099 @@
 """
-Audio API routes - handles TTS generation via external TTS service
-Segments are stored per-chunk with audio_url pointing to R2 CDN
-
-ARCHITECTURE:
-- Render backend (this file): Orchestration, chunking, DB storage, audio concatenation
-- Lightning AI: Stateless TTS (text → audio → R2 → URL)
-- Cloudflare R2: Audio file storage (both segments and full chapters)
+Audio API routes for the local TTS stack.
 """
 
-from pathlib import Path
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel
-from typing import Optional, List
-import logging
-import httpx
+from __future__ import annotations
+
+import json
 import io
+import logging
+import re
+import time
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import soundfile as sf
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
+from ..config import (
+    AUDIO_DIR,
+    QWEN_TTS_API_STYLE,
+    QWEN_TTS_LANGUAGE,
+    TTS_PROVIDER,
+    TTS_VOICE_PROFILE_DIR,
+)
+from ..database import dict_from_row, get_db
+from ..services.tts_provider import ENGLISH_VOICES, get_tts_provider
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Import configuration
-from ..config import TTS_SERVICE_URL, TTS_TIMEOUT
-
-# Import database utilities
-from ..database import get_db
-
-# Import R2 client for uploading concatenated audio
-from ..r2_client import upload_chapter_audio_to_r2, download_audio_from_url
-
-# Base directories (for backward compatibility during migration)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-AUDIO_DIR = BASE_DIR / "audio"
-
-# Ensure audio directory exists (for legacy files)
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-
-# English voices (fetched from TTS service, cached here as fallback)
-ENGLISH_VOICES = {
-    "American English (Female)": [
-        "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
-        "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky"
-    ],
-    "American English (Male)": [
-        "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
-        "am_michael", "am_onyx", "am_puck", "am_santa"
-    ],
-    "British English (Female)": [
-        "bf_alice", "bf_emma", "bf_isabella", "bf_lily"
-    ],
-    "British English (Male)": [
-        "bm_daniel", "bm_fable", "bm_george", "bm_lewis"
-    ]
-}
-
-# TTS generation jobs tracker (in-memory, not durable)
-# TODO: Replace with Redis/Celery for durable background jobs in Phase 2
+AUDIO_ROOT = Path(AUDIO_DIR)
+AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
+VOICE_PROFILE_ROOT = Path(TTS_VOICE_PROFILE_DIR)
+VOICE_PROFILE_ROOT.mkdir(parents=True, exist_ok=True)
 tts_jobs: dict = {}
 
 
-class TTSRequest(BaseModel):
-    text: str
-    voice: str = "af_heart"
-    novel_slug: Optional[str] = None
-    chapter_number: Optional[int] = None
+def _utc_now_iso() -> str:
+    return datetime.utcnow().isoformat()
 
 
-# ==================== Custom Exceptions ====================
-
-class TTSServiceError(Exception):
-    """Base exception for TTS service errors."""
-    pass
-
-
-class TTSUnavailableError(TTSServiceError):
-    """TTS service is not reachable."""
-    pass
+def _round_seconds(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return round(max(0.0, value), 2)
 
 
-class TTSTimeoutError(TTSServiceError):
-    """TTS request timed out."""
-    pass
+def _build_job_status(job: Optional[dict]) -> dict:
+    if not job:
+        return {}
 
+    started_monotonic = job.get("started_monotonic")
+    elapsed_seconds: Optional[float] = None
+    if isinstance(started_monotonic, (int, float)):
+        elapsed_seconds = time.monotonic() - float(started_monotonic)
 
-# ==================== TTS Service Client ====================
+    total_chunks = job.get("total_chunks")
+    completed_chunks = int(job.get("completed_chunks") or 0)
+    current_chunk = job.get("current_chunk")
 
-async def call_tts_service(text: str, voice: str, segment_id: str) -> dict:
-    """
-    Call Lightning AI TTS service to synthesize audio.
-    
-    Returns:
-        {
-            "audio_url": "https://r2.../seg_123.wav",
-            "duration": 3.2,
-            "sample_rate": 24000
-        }
-    
-    Raises:
-        HTTPException on 4xx errors (do not retry)
-        TTSUnavailableError on connection errors
-        TTSTimeoutError on timeout
-    """
-    url = f"{TTS_SERVICE_URL.rstrip('/')}/synthesize"
-    payload = {
-        "text": text,
-        "voice": voice,
-        "segment_id": segment_id
+    average_chunk_seconds: Optional[float] = None
+    if elapsed_seconds is not None and completed_chunks > 0:
+        average_chunk_seconds = elapsed_seconds / completed_chunks
+
+    current_chunk_started_monotonic = job.get("current_chunk_started_monotonic")
+    current_chunk_elapsed_seconds: Optional[float] = None
+    if isinstance(current_chunk_started_monotonic, (int, float)):
+        current_chunk_elapsed_seconds = time.monotonic() - float(current_chunk_started_monotonic)
+
+    estimated_remaining_seconds: Optional[float] = None
+    if (
+        total_chunks is not None
+        and isinstance(total_chunks, int)
+        and total_chunks >= completed_chunks
+        and average_chunk_seconds is not None
+        and job.get("status") == "generating"
+    ):
+        estimated_remaining_seconds = average_chunk_seconds * max(total_chunks - completed_chunks, 0)
+    elif job.get("status") == "completed":
+        estimated_remaining_seconds = 0.0
+
+    live_progress = job.get("progress")
+    if (
+        job.get("status") == "generating"
+        and isinstance(total_chunks, int)
+        and total_chunks > 0
+        and current_chunk_elapsed_seconds is not None
+    ):
+        chunk_span = 90 / total_chunks
+        progress_floor = (completed_chunks / total_chunks) * 90
+        expected_chunk_seconds = average_chunk_seconds or job.get("last_chunk_seconds") or 15.0
+        if expected_chunk_seconds and expected_chunk_seconds > 0:
+            chunk_fraction = min(current_chunk_elapsed_seconds / expected_chunk_seconds, 0.95)
+            live_progress = round(progress_floor + (chunk_span * chunk_fraction), 2)
+        else:
+            live_progress = round(progress_floor, 2)
+    elif job.get("status") == "completed":
+        live_progress = 100.0
+
+    return {
+        "job_status": job.get("status"),
+        "message": job.get("message"),
+        "progress": live_progress,
+        "current_chunk": current_chunk,
+        "completed_chunks": completed_chunks,
+        "total_chunks": total_chunks,
+        "elapsed_seconds": _round_seconds(elapsed_seconds),
+        "average_chunk_seconds": _round_seconds(average_chunk_seconds),
+        "current_chunk_elapsed_seconds": _round_seconds(current_chunk_elapsed_seconds),
+        "estimated_remaining_seconds": _round_seconds(estimated_remaining_seconds),
+        "started_at": job.get("started_at"),
+        "updated_at": job.get("updated_at"),
     }
-    
-    # Retry logic: only retry on 5xx/network/timeout errors
-    # Do NOT retry on 4xx errors (invalid text/voice)
-    max_retries = 3
-    last_error = None
-    
-    async with httpx.AsyncClient() as client:
-        for attempt in range(max_retries):
-            try:
-                response = await client.post(
-                    url, 
-                    json=payload, 
-                    timeout=TTS_TIMEOUT
-                )
-                
-                # 4xx errors: do not retry, fail immediately
-                if 400 <= response.status_code < 500:
-                    try:
-                        error_detail = response.json().get("detail", "Invalid request")
-                    except Exception:
-                        error_detail = f"TTS service error {response.status_code}"
-                    raise HTTPException(status_code=response.status_code, detail=error_detail)
-                
-                # 5xx errors: retry
-                if response.status_code >= 500:
-                    logger.warning(f"TTS service returned {response.status_code}, retry {attempt + 1}/{max_retries}")
-                    last_error = f"TTS service error: {response.status_code}"
-                    continue
-                
-                response.raise_for_status()
-                return response.json()
-                
-            except httpx.TimeoutException:
-                logger.warning(f"TTS request timed out, retry {attempt + 1}/{max_retries}")
-                last_error = "TTS request timed out"
-                if attempt == max_retries - 1:
-                    raise TTSTimeoutError(last_error)
-                    
-            except httpx.ConnectError:
-                logger.error(f"Cannot connect to TTS service at {TTS_SERVICE_URL}")
-                raise TTSUnavailableError(f"TTS service unavailable at {TTS_SERVICE_URL}")
-    
-    # All retries exhausted
-    raise TTSTimeoutError(last_error or "TTS service failed after retries")
 
 
-# ==================== Endpoints ====================
+def _get_audio_paths(novel_slug: str, chapter_number: int) -> tuple[Path, Path]:
+    audio_dir = AUDIO_ROOT / novel_slug
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    return (
+        audio_dir / f"Chapter_{chapter_number:04d}.wav",
+        audio_dir / f"Chapter_{chapter_number:04d}_timing.json",
+    )
+
+
+def _relative_audio_url(novel_slug: str, chapter_number: int) -> str:
+    return f"/audio/{novel_slug}/Chapter_{chapter_number:04d}.wav"
+
+
+def _audio_job_key(novel_slug: str, chapter_number: int) -> str:
+    return f"{novel_slug}_{chapter_number}"
+
+
+def _voice_profile_public(profile: Optional[dict]) -> dict:
+    if not profile:
+        return {
+            "exists": False,
+            "provider": TTS_PROVIDER,
+        }
+    return {
+        "exists": True,
+        "id": profile["id"],
+        "provider": profile["provider"],
+        "voice_name": profile.get("voice_name"),
+        "display_name": profile.get("display_name"),
+        "ref_text": profile.get("ref_text"),
+        "language": profile.get("language"),
+        "has_reference_audio": bool(profile.get("ref_audio_path")),
+        "updated_at": profile.get("updated_at"),
+    }
+
+
+def _get_novel_record(novel_slug: str) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM novels WHERE slug = ?", (novel_slug,))
+        return dict_from_row(cursor.fetchone())
+
+
+def _get_novel_tts_profile(novel_slug: str, provider_name: str = TTS_PROVIDER) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT p.*
+            FROM novel_tts_profiles p
+            JOIN novels n ON p.novel_id = n.id
+            WHERE n.slug = ? AND p.provider = ?
+            """,
+            (novel_slug, provider_name),
+        )
+        return dict_from_row(cursor.fetchone())
+
+
+def _upsert_novel_tts_profile(
+    *,
+    novel_id: int,
+    provider_name: str,
+    voice_name: Optional[str],
+    display_name: Optional[str],
+    ref_audio_path: Optional[str],
+    ref_text: Optional[str],
+    language: Optional[str],
+) -> dict:
+    now = datetime.utcnow()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id
+            FROM novel_tts_profiles
+            WHERE novel_id = ? AND provider = ?
+            """,
+            (novel_id, provider_name),
+        )
+        existing = cursor.fetchone()
+
+        if existing:
+            cursor.execute(
+                """
+                UPDATE novel_tts_profiles
+                SET voice_name = ?, display_name = ?, ref_audio_path = ?, ref_text = ?, language = ?, updated_at = ?
+                WHERE novel_id = ? AND provider = ?
+                """,
+                (voice_name, display_name, ref_audio_path, ref_text, language, now, novel_id, provider_name),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO novel_tts_profiles
+                    (novel_id, provider, voice_name, display_name, ref_audio_path, ref_text, language, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (novel_id, provider_name, voice_name, display_name, ref_audio_path, ref_text, language, now),
+            )
+
+        cursor.execute(
+            "SELECT * FROM novel_tts_profiles WHERE novel_id = ? AND provider = ?",
+            (novel_id, provider_name),
+        )
+        row = cursor.fetchone()
+    return dict_from_row(row)
+
+
+def _delete_novel_tts_profile(novel_slug: str, provider_name: str = TTS_PROVIDER) -> Optional[dict]:
+    profile = _get_novel_tts_profile(novel_slug, provider_name)
+    if not profile:
+        return None
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM novel_tts_profiles WHERE id = ?", (profile["id"],))
+
+    ref_audio_path = profile.get("ref_audio_path")
+    if ref_audio_path:
+        try:
+            Path(ref_audio_path).unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Failed to remove saved voice profile audio: %s", ref_audio_path, exc_info=True)
+    return profile
+
+
+def _save_reference_audio(novel_slug: str, source_filename: str, content: bytes) -> Path:
+    extension = Path(source_filename).suffix.lower() or ".wav"
+    if extension not in {".wav", ".mp3", ".flac", ".m4a", ".ogg"}:
+        raise HTTPException(status_code=400, detail="Unsupported reference audio format")
+
+    target_dir = VOICE_PROFILE_ROOT / novel_slug
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / f"{TTS_PROVIDER}_reference{extension}"
+    target_path.write_bytes(content)
+    return target_path
+
+
+def _validate_reference_audio_for_provider(content: bytes, source_filename: str) -> None:
+    extension = Path(source_filename).suffix.lower() or ".wav"
+    if TTS_PROVIDER == "qwen3" and QWEN_TTS_API_STYLE == "demo" and extension != ".wav":
+        raise HTTPException(
+            status_code=400,
+            detail="Qwen local demo mode currently expects a WAV reference clip. Convert your voice sample to .wav and upload it again.",
+        )
+
+    try:
+        sf.read(io.BytesIO(content), dtype="float32", always_2d=False)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Reference audio could not be decoded. Use a clean WAV clip "
+                "(PCM WAV, mono preferred, around 5-15 seconds). "
+                f"Original error: {exc}"
+            ),
+        ) from exc
+
+
+def _require_provider():
+    try:
+        return get_tts_provider()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _load_chapter_content(novel_slug: str, chapter_number: int) -> tuple[int, str]:
+    import httpx
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT c.id, c.content, c.content_path, c.content_url
+            FROM chapters c
+            JOIN novels n ON c.novel_id = n.id
+            WHERE n.slug = ? AND c.chapter_number = ?
+            """,
+            (novel_slug, chapter_number),
+        )
+        chapter = cursor.fetchone()
+
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found in database")
+
+    content = chapter["content"]
+    if not content and chapter["content_path"]:
+        chapter_file = Path(chapter["content_path"])
+        if chapter_file.exists():
+            raw = chapter_file.read_text(encoding="utf-8")
+            lines = raw.splitlines()
+            content = "\n".join(lines[3:] if len(lines) > 3 else lines).strip()
+
+    if not content and chapter["content_url"]:
+        try:
+            response = httpx.get(chapter["content_url"], timeout=15)
+            if response.status_code == 200:
+                content = response.text.strip()
+        except Exception as exc:
+            logger.warning("Failed to fetch chapter content from %s: %s", chapter["content_url"], exc)
+
+    if not content:
+        raise HTTPException(status_code=400, detail="Chapter content is empty")
+
+    return chapter["id"], content
+
+
+def _write_timings_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _save_audio_metadata(
+    novel_slug: str,
+    chapter_number: int,
+    voice: str,
+    status: str,
+    *,
+    provider_name: str = TTS_PROVIDER,
+    audio_url: Optional[str] = None,
+    duration: Optional[float] = None,
+    progress: float = 0.0,
+    error: Optional[str] = None,
+) -> None:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO chapter_audio (novel_slug, chapter_number, provider, voice, status, audio_url, duration, error, progress, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (novel_slug, chapter_number)
+            DO UPDATE SET
+                provider = excluded.provider,
+                voice = excluded.voice,
+                status = excluded.status,
+                audio_url = excluded.audio_url,
+                duration = excluded.duration,
+                error = excluded.error,
+                progress = excluded.progress,
+                updated_at = excluded.updated_at
+            """,
+            (
+                novel_slug,
+                chapter_number,
+                provider_name,
+                voice,
+                status,
+                audio_url,
+                duration,
+                error,
+                progress,
+                datetime.utcnow(),
+                datetime.utcnow(),
+            ),
+        )
+
+
+def _replace_timings(novel_slug: str, chapter_number: int, chunks: list[dict]) -> None:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM audio_timings WHERE novel_slug = ? AND chapter_number = ?",
+            (novel_slug, chapter_number),
+        )
+        for chunk in chunks:
+            cursor.execute(
+                """
+                INSERT INTO audio_timings (novel_slug, chapter_number, chunk_index, start_time, end_time, text, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    novel_slug,
+                    chapter_number,
+                    chunk["index"],
+                    chunk["start"],
+                    chunk["end"],
+                    chunk["text"],
+                    datetime.utcnow(),
+                ),
+            )
+
+
+def _mark_chapter_audio_path(novel_slug: str, chapter_number: int, audio_path: Path) -> None:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE chapters
+            SET audio_path = ?
+            WHERE id = (
+                SELECT c.id
+                FROM chapters c
+                JOIN novels n ON c.novel_id = n.id
+                WHERE n.slug = ? AND c.chapter_number = ?
+            )
+            """,
+            (str(audio_path), novel_slug, chapter_number),
+        )
+
+
+def _parse_audio_job_key(job_key: str) -> Optional[tuple[str, int]]:
+    match = re.match(r"^(?P<novel_slug>.+)_(?P<chapter_number>\d+)$", job_key)
+    if not match:
+        return None
+    return match.group("novel_slug"), int(match.group("chapter_number"))
+
+
+def _serialize_audio_job(row: Optional[dict], live_job: Optional[dict] = None) -> Optional[dict]:
+    if not row:
+        return None
+
+    novel_slug = row["novel_slug"]
+    chapter_number = row["chapter_number"]
+    audio_path, _ = _get_audio_paths(novel_slug, chapter_number)
+    audio_exists = audio_path.exists()
+    job_status = _build_job_status(live_job)
+    inferred_status = "completed" if audio_exists else (job_status.get("job_status") or row.get("status") or "pending")
+    inferred_progress = (
+        100.0
+        if audio_exists
+        else float(job_status.get("progress", row.get("progress") or 0.0))
+    )
+
+    return {
+        "job_id": f"audio:{novel_slug}:{chapter_number}",
+        "job_key": _audio_job_key(novel_slug, chapter_number),
+        "novel_slug": novel_slug,
+        "novel_title": row.get("novel_title"),
+        "chapter_number": chapter_number,
+        "chapter_title": row.get("chapter_title") or f"Chapter {chapter_number}",
+        "status": inferred_status,
+        "progress": round(max(inferred_progress, 0.0), 2),
+        "provider": row.get("provider") or (TTS_PROVIDER if inferred_status != "not_found" else None),
+        "voice": row.get("voice"),
+        "audio_url": row.get("audio_url") or (_relative_audio_url(novel_slug, chapter_number) if audio_exists else None),
+        "duration": row.get("duration") or live_job.get("duration") if live_job else row.get("duration"),
+        "error": row.get("error") or (live_job.get("error") if live_job else None),
+        "exists": audio_exists,
+        "current_chunk": job_status.get("current_chunk"),
+        "completed_chunks": job_status.get("completed_chunks", 0),
+        "total_chunks": job_status.get("total_chunks"),
+        "elapsed_seconds": job_status.get("elapsed_seconds"),
+        "average_chunk_seconds": job_status.get("average_chunk_seconds"),
+        "estimated_remaining_seconds": job_status.get("estimated_remaining_seconds"),
+        "message": job_status.get("message") or row.get("status"),
+        "updated_at": job_status.get("updated_at") or row.get("updated_at") or row.get("created_at"),
+        "started_at": job_status.get("started_at") or row.get("created_at"),
+    }
+
+
+def _sortable_timestamp(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
 
 @router.get("/wake")
 async def wake_tts_service():
-    """
-    Wake up the Lightning AI TTS service.
-    
-    Call this endpoint to ensure TTS service is awake before generating audio.
-    Lightning AI studios sleep after 10 min of inactivity.
-    
-    Returns the TTS service status.
-    """
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{TTS_SERVICE_URL}/", timeout=60)  # Long timeout for cold start
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    "status": "awake",
-                    "tts_service": TTS_SERVICE_URL,
-                    "model_loaded": data.get("model_loaded", False),
-                    "gpu_available": data.get("gpu_available", False)
-                }
-            else:
-                return {
-                    "status": "error",
-                    "tts_service": TTS_SERVICE_URL,
-                    "error": f"TTS service returned {response.status_code}"
-                }
-    except httpx.ConnectError:
-        return {
-            "status": "sleeping",
-            "tts_service": TTS_SERVICE_URL,
-            "error": "TTS service not reachable (may be sleeping)",
-            "hint": "Try again in 30-60 seconds"
-        }
-    except httpx.ReadTimeout:
-        return {
-            "status": "waking",
-            "tts_service": TTS_SERVICE_URL,
-            "message": "TTS service is waking up, model loading...",
-            "hint": "Try again in 30-60 seconds"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "tts_service": TTS_SERVICE_URL,
-            "error": str(e)
-        }
+    provider = _require_provider()
+    return {"status": "ready", **provider.health()}
 
 
 @router.get("/health")
 async def tts_health_check():
-    """Quick health check for TTS service connectivity."""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{TTS_SERVICE_URL}/", timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    "tts_available": True,
-                    "model_loaded": data.get("model_loaded", False),
-                    "gpu_enabled": data.get("gpu_enabled", False)
-                }
-    except Exception:
-        pass
-    
+        provider = get_tts_provider()
+    except Exception as exc:
+        return {
+            "tts_available": False,
+            "provider": TTS_PROVIDER,
+            "error": str(exc),
+        }
+
+    health = provider.health()
     return {
-        "tts_available": False,
-        "model_loaded": False,
-        "gpu_enabled": False
+        "tts_available": True,
+        "provider": health["provider"],
+        "model_loaded": True,
+        "gpu_enabled": health["device"] == "cuda",
+        "device": health["device"],
+        "gpu_name": health["gpu_name"],
+        "supports_voice_cloning": health.get("supports_voice_cloning", False),
+        "service_style": health.get("service_style"),
+        "base_url": health.get("base_url"),
     }
 
 
 @router.get("/voices")
 async def list_voices():
-    """List available English TTS voices."""
-    # Try to fetch from TTS service, fallback to cached list
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{TTS_SERVICE_URL}/voices", timeout=5)
-            if response.status_code == 200:
-                return response.json()
-    except Exception as e:
-        logger.warning(f"Could not fetch voices from TTS service: {e}")
-    
-    return ENGLISH_VOICES
+        return get_tts_provider().list_voices()
+    except Exception:
+        return ENGLISH_VOICES
 
 
 @router.get("/voices/flat")
 async def list_voices_flat():
-    """List all voices as a flat array."""
-    all_voices = []
-    for group, voices in ENGLISH_VOICES.items():
-        for voice in voices:
-            all_voices.append({"id": voice, "group": group})
-    return all_voices
+    provider = get_tts_provider()
+    voices = []
+    for group, group_voices in provider.list_voices().items():
+        for voice in group_voices:
+            voices.append({"id": voice, "group": group})
+    return voices
 
 
 @router.get("/stream/{novel_slug}/{chapter_number}")
 async def stream_chapter_audio(novel_slug: str, chapter_number: int):
-    """
-    Stream/redirect to audio for a chapter.
-    
-    Checks chapter_audio table for full chapter audio URL.
-    Falls back to local filesystem for legacy files.
-    """
-    # Check for full chapter audio in database
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT audio_url FROM chapter_audio
-            WHERE novel_slug = ? AND chapter_number = ? AND status = 'completed'
-        ''', (novel_slug, chapter_number))
-        
-        result = cursor.fetchone()
-        if result and result['audio_url']:
-            # Redirect to R2 CDN URL
-            return RedirectResponse(url=result['audio_url'])
-    
-    # Legacy fallback: check local filesystem
-    audio_path = AUDIO_DIR / novel_slug / f"Chapter_{chapter_number:04d}.wav"
-    
-    if audio_path.exists():
-        return FileResponse(
-            audio_path,
-            media_type="audio/wav",
-            filename=f"{novel_slug}_chapter_{chapter_number}.wav"
-        )
-    
-    raise HTTPException(
-        status_code=404, 
-        detail="Audio not generated yet. Use /generate to create audio first."
+    audio_path, _ = _get_audio_paths(novel_slug, chapter_number)
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="Audio not generated yet. Use /generate first.")
+
+    return FileResponse(
+        audio_path,
+        media_type="audio/wav",
+        filename=f"{novel_slug}_chapter_{chapter_number}.wav",
     )
 
 
 @router.get("/status/{novel_slug}/{chapter_number}")
 async def check_audio_status(novel_slug: str, chapter_number: int):
-    """Check if audio exists for a chapter."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # Check chapter_audio table for full chapter audio
-        cursor.execute('''
+        cursor.execute(
+            """
             SELECT status, audio_url, duration, progress, error
+                 , provider, voice
             FROM chapter_audio
             WHERE novel_slug = ? AND chapter_number = ?
-        ''', (novel_slug, chapter_number))
-        
-        result = cursor.fetchone()
-        
-        if result:
-            status = result['status']
-            return {
-                "exists": status == 'completed',
-                "generating": status == 'generating',
-                "status": status,
-                "audio_url": result['audio_url'] if status == 'completed' else None,
-                "duration": result['duration'],
-                "progress": result['progress'] or 0,
-                "error": result['error']
-            }
-    
-    # Check filesystem as fallback
-    audio_path = AUDIO_DIR / novel_slug / f"Chapter_{chapter_number:04d}.wav"
-    
-    # Check in-memory job status
-    job_key = f"{novel_slug}_{chapter_number}"
-    job = tts_jobs.get(job_key, {})
-    
+            """,
+            (novel_slug, chapter_number),
+        )
+        row = cursor.fetchone()
+
+    audio_path, timing_path = _get_audio_paths(novel_slug, chapter_number)
+    job = tts_jobs.get(_audio_job_key(novel_slug, chapter_number), {})
+    audio_exists = audio_path.exists()
+    timing_exists = timing_path.exists()
+    job_status = _build_job_status(job)
+
+    if row:
+        inferred_audio_url = row["audio_url"] or (_relative_audio_url(novel_slug, chapter_number) if audio_exists else None)
+        inferred_status = "completed" if audio_exists else (job_status.get("job_status") or row["status"])
+        live_progress = (
+            100
+            if audio_exists
+            else job_status.get("progress", row["progress"] or 0)
+        )
+        return {
+            "exists": audio_exists,
+            "audio_only": audio_exists,
+            "timing_exists": timing_exists,
+            "generating": inferred_status == "generating" and not audio_exists,
+            "status": inferred_status,
+            "audio_url": inferred_audio_url,
+            "duration": row["duration"],
+            "progress": live_progress,
+            "error": row["error"],
+            "provider": row["provider"],
+            "voice": row["voice"],
+            **job_status,
+        }
+
     return {
-        "exists": audio_path.exists(),
-        "generating": job.get("status") == "generating",
-        "status": "completed" if audio_path.exists() else ("generating" if job.get("status") == "generating" else "not_found"),
-        "audio_url": None,
-        "duration": None,
-        "progress": job.get("progress", 0),
-        "error": job.get("error")
+        "exists": audio_exists,
+        "audio_only": audio_exists,
+        "timing_exists": timing_exists,
+        "generating": job.get("status") == "generating" and not audio_exists,
+        "status": "completed" if audio_exists else ("generating" if job.get("status") == "generating" else "not_found"),
+        "audio_url": _relative_audio_url(novel_slug, chapter_number) if audio_exists else None,
+        "duration": job.get("duration"),
+        "progress": 100 if audio_exists else job_status.get("progress", job.get("progress", 0)),
+        "error": job.get("error"),
+        **job_status,
     }
+
+
+@router.get("/jobs")
+async def list_audio_jobs(novel_slug: Optional[str] = None):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        query = """
+            SELECT
+                ca.*,
+                n.title AS novel_title,
+                c.title AS chapter_title
+            FROM chapter_audio ca
+            LEFT JOIN novels n ON n.slug = ca.novel_slug
+            LEFT JOIN chapters c
+                ON c.novel_id = n.id
+               AND c.chapter_number = ca.chapter_number
+        """
+        params: list = []
+        if novel_slug:
+            query += " WHERE ca.novel_slug = ?"
+            params.append(novel_slug)
+        query += " ORDER BY COALESCE(ca.updated_at, ca.created_at) DESC, ca.chapter_number DESC"
+        cursor.execute(query, params)
+        rows = [dict_from_row(row) for row in cursor.fetchall()]
+
+    rows_by_key = {
+        _audio_job_key(row["novel_slug"], row["chapter_number"]): row
+        for row in rows
+        if row is not None
+    }
+
+    for job_key in list(tts_jobs.keys()):
+        parsed = _parse_audio_job_key(job_key)
+        if not parsed:
+            continue
+        live_novel_slug, live_chapter_number = parsed
+        if novel_slug and live_novel_slug != novel_slug:
+            continue
+        if job_key not in rows_by_key:
+            rows_by_key[job_key] = {
+                "novel_slug": live_novel_slug,
+                "chapter_number": live_chapter_number,
+                "provider": TTS_PROVIDER,
+                "voice": None,
+                "status": tts_jobs[job_key].get("status"),
+                "audio_url": None,
+                "duration": tts_jobs[job_key].get("duration"),
+                "error": tts_jobs[job_key].get("error"),
+                "progress": tts_jobs[job_key].get("progress", 0.0),
+                "chapter_title": f"Chapter {live_chapter_number}",
+                "novel_title": None,
+                "created_at": None,
+                "updated_at": tts_jobs[job_key].get("updated_at"),
+            }
+
+    jobs = [
+        _serialize_audio_job(row, tts_jobs.get(job_key))
+        for job_key, row in rows_by_key.items()
+    ]
+    jobs = [job for job in jobs if job is not None]
+    jobs.sort(
+        key=lambda job: (
+            _sortable_timestamp(job.get("updated_at")),
+            job.get("chapter_number") or 0,
+        ),
+        reverse=True,
+    )
+    return {"jobs": jobs, "total": len(jobs)}
 
 
 @router.get("/timings/{novel_slug}/{chapter_number}")
 async def get_chapter_timings(novel_slug: str, chapter_number: int):
-    """Get chunk timing data for karaoke-style highlighting."""
-    
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # Get timings from audio_timings table
-        cursor.execute('''
+        cursor.execute(
+            """
             SELECT chunk_index, start_time, end_time, text
             FROM audio_timings
             WHERE novel_slug = ? AND chapter_number = ?
             ORDER BY chunk_index ASC
-        ''', (novel_slug, chapter_number))
-        
+            """,
+            (novel_slug, chapter_number),
+        )
         timings = cursor.fetchall()
-        
-        if not timings:
-            # Check if audio exists but no timings
-            cursor.execute('''
-                SELECT status FROM chapter_audio
-                WHERE novel_slug = ? AND chapter_number = ?
-            ''', (novel_slug, chapter_number))
-            
-            audio_status = cursor.fetchone()
-            if audio_status:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Audio status is '{audio_status['status']}' but no timing data found."
-                )
-            
-            raise HTTPException(
-                status_code=404,
-                detail="No timing data found. Generate audio first."
-            )
-        
-        # Build response
-        chunks = []
-        total_duration = 0.0
-        
-        for t in timings:
-            chunk_data = {
-                "index": t['chunk_index'],
-                "text": t['text'],
-                "start": t['start_time'],
-                "end": t['end_time']
+
+    if timings:
+        chunks = [
+            {
+                "index": row["chunk_index"],
+                "text": row["text"],
+                "start": row["start_time"],
+                "end": row["end_time"],
             }
-            chunks.append(chunk_data)
-            total_duration = max(total_duration, t['end_time'])
-        
+            for row in timings
+        ]
+        total_duration = max(chunk["end"] for chunk in chunks)
         return {
             "novel_slug": novel_slug,
             "chapter_number": chapter_number,
             "total_duration": round(total_duration, 3),
             "chunk_count": len(chunks),
-            "chunks": chunks
+            "chunks": chunks,
         }
+
+    _, timing_path = _get_audio_paths(novel_slug, chapter_number)
+    if timing_path.exists():
+        return json.loads(timing_path.read_text(encoding="utf-8"))
+
+    raise HTTPException(status_code=404, detail="Timing data not found. Generate audio first.")
+
+
+@router.get("/profile/{novel_slug}")
+async def get_novel_voice_profile(novel_slug: str):
+    provider = _require_provider()
+    profile = _get_novel_tts_profile(novel_slug)
+    payload = _voice_profile_public(profile)
+    payload["supports_voice_cloning"] = getattr(provider, "supports_voice_cloning", False)
+    payload["provider"] = provider.health().get("provider", TTS_PROVIDER)
+    return payload
+
+
+@router.post("/profile/{novel_slug}")
+async def upload_novel_voice_profile(
+    novel_slug: str,
+    audio: UploadFile = File(...),
+    ref_text: str = Form(""),
+    display_name: str = Form(""),
+    voice_name: str = Form("novel-default"),
+    language: str = Form(QWEN_TTS_LANGUAGE),
+    auto_transcribe: bool = Form(True),
+):
+    provider = _require_provider()
+    if not getattr(provider, "supports_voice_cloning", False):
+        raise HTTPException(status_code=400, detail=f"{TTS_PROVIDER} does not support saved voice profiles")
+
+    novel = _get_novel_record(novel_slug)
+    if not novel:
+        raise HTTPException(status_code=404, detail="Novel not found")
+
+    content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Reference audio file is empty")
+    if len(content) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Reference audio must be 25MB or smaller")
+    _validate_reference_audio_for_provider(content, audio.filename or "reference.wav")
+
+    target_path = _save_reference_audio(novel_slug, audio.filename or "reference.wav", content)
+    transcription = ref_text.strip()
+    if not transcription and auto_transcribe:
+        try:
+            transcription = (provider.transcribe_reference_audio(content, audio.filename or target_path.name) or "").strip()
+        except Exception as exc:
+            logger.warning("Reference transcription failed for %s: %s", novel_slug, exc)
+
+    profile = _upsert_novel_tts_profile(
+        novel_id=novel["id"],
+        provider_name=TTS_PROVIDER,
+        voice_name=(voice_name or "novel-default").strip(),
+        display_name=(display_name or audio.filename or "Novel Voice").strip(),
+        ref_audio_path=str(target_path),
+        ref_text=transcription or None,
+        language=(language or QWEN_TTS_LANGUAGE).strip(),
+    )
+    payload = _voice_profile_public(profile)
+    payload["supports_voice_cloning"] = True
+    return payload
+
+
+@router.delete("/profile/{novel_slug}")
+async def delete_novel_voice_profile(novel_slug: str):
+    provider = _require_provider()
+    if not getattr(provider, "supports_voice_cloning", False):
+        raise HTTPException(status_code=400, detail=f"{TTS_PROVIDER} does not support saved voice profiles")
+
+    deleted = _delete_novel_tts_profile(novel_slug)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No saved voice profile for this novel")
+    return {"status": "deleted", "provider": TTS_PROVIDER}
 
 
 @router.post("/generate/{novel_slug}/{chapter_number}")
 async def generate_chapter_audio(
-    novel_slug: str, 
-    chapter_number: int, 
+    novel_slug: str,
+    chapter_number: int,
     voice: str = "af_heart",
-    background_tasks: BackgroundTasks = BackgroundTasks()
+    background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
-    """
-    Generate audio for a chapter using external TTS service.
-    
-    Flow:
-    1. Check if audio already exists in chapter_audio table
-    2. Get chapter content from database or R2
-    3. Create chapter_audio record with 'generating' status
-    4. Queue background task to generate audio
-    """
-    
-    job_key = f"{novel_slug}_{chapter_number}"
-    
-    # Check if already exists or generating
+    provider = _require_provider()
+    profile = _get_novel_tts_profile(novel_slug)
+    if getattr(provider, "supports_voice_cloning", False) and not profile:
+        raise HTTPException(
+            status_code=400,
+            detail="No saved Qwen voice profile for this novel. Upload one from the novel page first.",
+        )
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT status, audio_url, duration FROM chapter_audio
+        cursor.execute(
+            """
+            SELECT status, audio_url, duration
+            FROM chapter_audio
             WHERE novel_slug = ? AND chapter_number = ?
-        ''', (novel_slug, chapter_number))
-        
+            """,
+            (novel_slug, chapter_number),
+        )
         existing = cursor.fetchone()
-        
-        if existing:
-            if existing['status'] == 'completed':
-                return {
-                    "status": "exists", 
-                    "message": "Audio already generated",
-                    "audio_url": existing['audio_url'],
-                    "duration": existing['duration']
-                }
-            elif existing['status'] == 'generating':
-                return {
-                    "status": "already_generating", 
-                    "message": "Audio generation in progress"
-                }
-    
-    # Get chapter content
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT c.id, c.content, c.content_path, c.content_url
-            FROM chapters c
-            JOIN novels n ON c.novel_id = n.id
-            WHERE n.slug = ? AND c.chapter_number = ?
-        ''', (novel_slug, chapter_number))
-        
-        chapter = cursor.fetchone()
-        
-        if not chapter:
-            raise HTTPException(status_code=404, detail="Chapter not found in database")
-        
-        chapter_id = chapter['id']
-        content = chapter['content']
-        
-        # Try to get content from R2 if not in DB
-        if not content and chapter['content_url']:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(chapter['content_url'], timeout=30)
-                    if response.status_code == 200:
-                        content = response.text
-            except Exception as e:
-                logger.warning(f"Could not fetch content from R2: {e}")
-        
-        # Fallback to file if content not in DB
-        if not content and chapter['content_path']:
-            chapter_file = Path(chapter['content_path'])
-            if chapter_file.exists():
-                with open(chapter_file, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                    content = '\n'.join(lines[3:]) if len(lines) > 3 else '\n'.join(lines)
-        
-        if not content or not content.strip():
-            raise HTTPException(status_code=400, detail="Chapter content is empty")
-    
-    # Create or update chapter_audio record
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO chapter_audio (novel_slug, chapter_number, voice, status, progress, created_at)
-            VALUES (?, ?, ?, 'generating', 0, ?)
-            ON CONFLICT (novel_slug, chapter_number) 
-            DO UPDATE SET status = 'generating', voice = ?, progress = 0, error = NULL, updated_at = ?
-        ''', (novel_slug, chapter_number, voice, datetime.utcnow(), voice, datetime.utcnow()))
-        conn.commit()
-    
-    # Queue TTS generation
-    tts_jobs[job_key] = {"status": "generating", "progress": 0}
-    
-    background_tasks.add_task(
-        run_tts_generation,
+
+    if existing:
+        if existing["status"] == "completed":
+            return {
+                "status": "exists",
+                "message": "Audio already generated",
+                "audio_url": existing["audio_url"],
+                "duration": existing["duration"],
+            }
+        if existing["status"] == "generating":
+            return {"status": "already_generating", "message": "Audio generation in progress"}
+
+    _, content = _load_chapter_content(novel_slug, chapter_number)
+    _save_audio_metadata(
         novel_slug,
         chapter_number,
-        content,
         voice,
-        job_key
+        "generating",
+        provider_name=provider.health().get("provider", TTS_PROVIDER),
+        progress=0.0,
+        error=None,
     )
-    
+
+    job_key = _audio_job_key(novel_slug, chapter_number)
+    now_iso = _utc_now_iso()
+    tts_jobs[job_key] = {
+        "status": "generating",
+        "progress": 0,
+        "message": "Queued for generation",
+        "current_chunk": 0,
+        "completed_chunks": 0,
+        "total_chunks": None,
+        "current_chunk_started_monotonic": None,
+        "last_chunk_seconds": None,
+        "started_at": now_iso,
+        "updated_at": now_iso,
+        "started_monotonic": time.monotonic(),
+    }
+    background_tasks.add_task(run_tts_generation, novel_slug, chapter_number, content, voice, job_key)
+
     return {
         "status": "queued",
         "message": f"Audio generation started for {novel_slug} chapter {chapter_number}",
-        "voice": voice
+        "voice": voice,
     }
 
 
-async def run_tts_generation(
-    novel_slug: str, 
-    chapter_number: int,
-    text: str, 
-    voice: str, 
-    job_key: str
-):
-    """
-    Background task to generate full chapter audio via TTS service.
-    
-    Flow:
-    1. Split text into chunks
-    2. For each chunk, call TTS service to get audio segment
-    3. Download each audio segment from R2
-    4. Concatenate all audio into single WAV file using pydub
-    5. Upload final concatenated audio to R2
-    6. Save timing data to database
-    7. Optionally clean up individual segment files
-    """
+def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: str, job_key: str):
+    import soundfile as sf
+
+    provider = get_tts_provider()
+    audio_path, timing_path = _get_audio_paths(novel_slug, chapter_number)
+    profile = _get_novel_tts_profile(novel_slug)
+    provider_name = provider.health().get("provider", TTS_PROVIDER)
+
     try:
-        # Split text into chunks
         chunks = split_text_into_chunks(text, max_length=500)
-        logger.info(f"Processing {novel_slug} Ch.{chapter_number}: {len(chunks)} chunks")
-        
         if not chunks:
             raise ValueError("No chunks to process")
-        
-        # Clear existing timings for this chapter
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM audio_timings 
-                WHERE novel_slug = ? AND chapter_number = ?
-            ''', (novel_slug, chapter_number))
-            conn.commit()
-        
-        # Process each chunk - collect audio URLs and timing data
-        current_time = 0.0
-        silence_gap = 0.3  # Gap between chunks in seconds
-        timings = []
-        audio_urls = []
-        failed_chunks = []
-        
-        for idx, chunk in enumerate(chunks):
-            progress = int((idx / len(chunks)) * 90)  # Reserve 10% for concatenation
-            tts_jobs[job_key] = {"status": "generating", "progress": progress}
-            
-            # Update progress in database
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE chapter_audio SET progress = ?, updated_at = ?
-                    WHERE novel_slug = ? AND chapter_number = ?
-                ''', (progress, datetime.utcnow(), novel_slug, chapter_number))
-                conn.commit()
-            
-            # Create unique segment ID
-            segment_id = f"{novel_slug}_ch{chapter_number}_seg{idx:04d}"
-            
-            try:
-                logger.info(f"  [{idx + 1}/{len(chunks)}] Generating: {chunk[:50]}...")
-                
-                # Call TTS service
-                result = await call_tts_service(chunk.strip(), voice, segment_id)
-                
-                duration = result.get('duration', 0.0)
-                audio_url = result.get('audio_url', '')
-                
-                # Record timing
-                timing = {
-                    "chunk_index": idx,
-                    "start_time": round(current_time, 3),
-                    "end_time": round(current_time + duration, 3),
-                    "text": chunk.strip()
-                }
-                timings.append(timing)
-                audio_urls.append(audio_url)
-                
-                # Save timing to database
-                with get_db() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        INSERT INTO audio_timings (novel_slug, chapter_number, chunk_index, start_time, end_time, text, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (novel_slug, chapter_number, idx, timing['start_time'], timing['end_time'], chunk.strip(), datetime.utcnow()))
-                    conn.commit()
-                
-                current_time += duration + silence_gap
-                logger.info(f"    ✓ Chunk {idx + 1}: {duration:.2f}s")
-                
-            except (TTSUnavailableError, TTSTimeoutError) as e:
-                logger.error(f"    ✗ Chunk {idx + 1} failed: {e}")
-                failed_chunks.append(idx)
-                audio_urls.append(None)
-                
-            except HTTPException as e:
-                logger.error(f"    ✗ Chunk {idx + 1} invalid: {e.detail}")
-                failed_chunks.append(idx)
-                audio_urls.append(None)
-        
-        # Check if we have enough audio to proceed
-        valid_urls = [url for url in audio_urls if url]
-        if not valid_urls:
-            raise ValueError("No audio segments generated successfully")
-        
-        logger.info(f"Generated {len(valid_urls)}/{len(chunks)} segments, now concatenating...")
-        tts_jobs[job_key] = {"status": "concatenating", "progress": 92}
-        
-        # Concatenate audio segments
-        final_audio_url = await concatenate_and_upload_audio(
-            audio_urls=audio_urls,
-            novel_slug=novel_slug,
-            chapter_number=chapter_number,
-            silence_gap_ms=int(silence_gap * 1000)
-        )
-        
-        total_duration = current_time - silence_gap if current_time > 0 else 0
-        
-        # Update chapter_audio record
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE chapter_audio 
-                SET status = 'completed', audio_url = ?, duration = ?, progress = 100, updated_at = ?
-                WHERE novel_slug = ? AND chapter_number = ?
-            ''', (final_audio_url, total_duration, datetime.utcnow(), novel_slug, chapter_number))
-            conn.commit()
-        
+
+        existing_job = tts_jobs.get(job_key, {})
         tts_jobs[job_key] = {
-            "status": "complete", 
-            "progress": 100,
-            "chunks": len(chunks),
-            "failed_chunks": len(failed_chunks),
-            "duration": total_duration,
-            "audio_url": final_audio_url
+            "status": "generating",
+            "progress": 0,
+            "message": "Preparing audio chunks",
+            "current_chunk": 0,
+            "completed_chunks": 0,
+            "total_chunks": len(chunks),
+            "current_chunk_started_monotonic": None,
+            "last_chunk_seconds": existing_job.get("last_chunk_seconds"),
+            "started_at": existing_job.get("started_at") or _utc_now_iso(),
+            "updated_at": _utc_now_iso(),
+            "started_monotonic": existing_job.get("started_monotonic") or time.monotonic(),
         }
-        logger.info(f"✓✓ Generation complete: {len(timings)} chunks, {total_duration:.2f}s, URL: {final_audio_url}")
-            
-    except Exception as e:
-        logger.error(f"❌ TTS generation failed: {e}", exc_info=True)
-        tts_jobs[job_key] = {"status": "failed", "error": str(e)}
-        
-        # Update chapter_audio record with error
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE chapter_audio 
-                SET status = 'failed', error = ?, updated_at = ?
-                WHERE novel_slug = ? AND chapter_number = ?
-            ''', (str(e), datetime.utcnow(), novel_slug, chapter_number))
-            conn.commit()
+
+        audio_segments = []
+        chunk_timings = []
+        current_time = 0.0
+        silence_duration = 0.3
+        silence = np.zeros(int(provider.sample_rate * silence_duration), dtype=np.float32)
+
+        for idx, chunk in enumerate(chunks):
+            progress = round((idx / len(chunks)) * 90, 2)
+            chunk_started_monotonic = time.monotonic()
+            tts_jobs[job_key].update(
+                {
+                    "status": "generating",
+                    "progress": progress,
+                    "message": f"Synthesizing chunk {idx + 1} of {len(chunks)}",
+                    "current_chunk": idx + 1,
+                    "completed_chunks": idx,
+                    "total_chunks": len(chunks),
+                    "current_chunk_started_monotonic": chunk_started_monotonic,
+                    "updated_at": _utc_now_iso(),
+                }
+            )
+            logger.info(
+                "TTS progress %s chapter %s: starting chunk %s/%s (%.2f%%)",
+                novel_slug,
+                chapter_number,
+                idx + 1,
+                len(chunks),
+                progress,
+            )
+            _save_audio_metadata(
+                novel_slug,
+                chapter_number,
+                voice,
+                "generating",
+                provider_name=provider_name,
+                progress=progress,
+            )
+
+            audio = provider.synthesize(chunk.strip(), voice, profile=profile)
+            if audio.ndim > 1:
+                audio = audio.squeeze()
+            audio = np.asarray(audio, dtype=np.float32)
+            duration = len(audio) / provider.sample_rate
+            completed_chunks = idx + 1
+            chunk_elapsed_seconds = time.monotonic() - chunk_started_monotonic
+            completed_progress = round((completed_chunks / len(chunks)) * 90, 2)
+
+            tts_jobs[job_key].update(
+                {
+                    "status": "generating",
+                    "progress": completed_progress,
+                    "message": (
+                        "Combining audio chunks"
+                        if completed_chunks == len(chunks)
+                        else f"Processed {completed_chunks} of {len(chunks)} chunks"
+                    ),
+                    "current_chunk": idx + 1,
+                    "completed_chunks": completed_chunks,
+                    "total_chunks": len(chunks),
+                    "current_chunk_started_monotonic": chunk_started_monotonic,
+                    "last_chunk_seconds": round(chunk_elapsed_seconds, 2),
+                    "updated_at": _utc_now_iso(),
+                }
+            )
+            logger.info(
+                "TTS progress %s chapter %s: finished chunk %s/%s in %.2fs (%.2f%%)",
+                novel_slug,
+                chapter_number,
+                completed_chunks,
+                len(chunks),
+                chunk_elapsed_seconds,
+                completed_progress,
+            )
+            _save_audio_metadata(
+                novel_slug,
+                chapter_number,
+                voice,
+                "generating",
+                provider_name=provider_name,
+                progress=completed_progress,
+            )
+
+            chunk_timings.append(
+                {
+                    "index": idx,
+                    "text": chunk.strip(),
+                    "start": round(current_time, 3),
+                    "end": round(current_time + duration, 3),
+                    "duration": round(duration, 3),
+                }
+            )
+            audio_segments.append(audio)
+            current_time += duration + silence_duration
+
+        if not audio_segments:
+            raise ValueError("No audio segments were generated")
+
+        combined = []
+        for idx, segment in enumerate(audio_segments):
+            combined.append(segment)
+            if idx < len(audio_segments) - 1:
+                combined.append(silence)
+        final_audio = np.concatenate(combined)
+        total_duration = len(final_audio) / provider.sample_rate
+
+        sf.write(str(audio_path), final_audio, provider.sample_rate)
+
+        timing_payload = {
+            "novel_slug": novel_slug,
+            "chapter_number": chapter_number,
+            "total_duration": round(total_duration, 3),
+            "chunk_count": len(chunk_timings),
+            "sample_rate": provider.sample_rate,
+            "provider": provider.health()["provider"],
+            "chunks": chunk_timings,
+        }
+        _write_timings_json(timing_path, timing_payload)
+        _replace_timings(novel_slug, chapter_number, chunk_timings)
+        _mark_chapter_audio_path(novel_slug, chapter_number, audio_path)
+
+        audio_url = _relative_audio_url(novel_slug, chapter_number)
+        _save_audio_metadata(
+            novel_slug,
+            chapter_number,
+            voice,
+            "completed",
+            provider_name=provider_name,
+            audio_url=audio_url,
+            duration=round(total_duration, 3),
+            progress=100.0,
+            error=None,
+        )
+        tts_jobs[job_key] = {
+            "status": "completed",
+            "progress": 100,
+            "message": "Audio ready",
+            "duration": round(total_duration, 3),
+            "audio_url": audio_url,
+            "current_chunk": len(chunk_timings),
+            "completed_chunks": len(chunk_timings),
+            "total_chunks": len(chunk_timings),
+            "current_chunk_started_monotonic": None,
+            "last_chunk_seconds": tts_jobs.get(job_key, {}).get("last_chunk_seconds"),
+            "started_at": existing_job.get("started_at") or _utc_now_iso(),
+            "updated_at": _utc_now_iso(),
+            "started_monotonic": existing_job.get("started_monotonic"),
+        }
+        logger.info(
+            "TTS progress %s chapter %s: audio ready with %s chunks (100%%)",
+            novel_slug,
+            chapter_number,
+            len(chunk_timings),
+        )
+    except Exception as exc:
+        logger.error("TTS generation failed for %s chapter %s: %s", novel_slug, chapter_number, exc, exc_info=True)
+        _save_audio_metadata(
+            novel_slug,
+            chapter_number,
+            voice,
+            "failed",
+            provider_name=provider_name,
+            progress=0.0,
+            error=str(exc),
+        )
+        failed_existing_job = tts_jobs.get(job_key, {})
+        tts_jobs[job_key] = {
+            "status": "failed",
+            "progress": 0,
+            "error": str(exc),
+            "message": "Audio generation failed",
+            "current_chunk": failed_existing_job.get("current_chunk"),
+            "completed_chunks": failed_existing_job.get("completed_chunks", 0),
+            "total_chunks": failed_existing_job.get("total_chunks"),
+            "current_chunk_started_monotonic": None,
+            "last_chunk_seconds": failed_existing_job.get("last_chunk_seconds"),
+            "started_at": failed_existing_job.get("started_at"),
+            "updated_at": _utc_now_iso(),
+            "started_monotonic": failed_existing_job.get("started_monotonic"),
+        }
 
 
-async def concatenate_and_upload_audio(
-    audio_urls: List[Optional[str]],
-    novel_slug: str,
-    chapter_number: int,
-    silence_gap_ms: int = 300
-) -> Optional[str]:
-    """
-    Download audio segments, concatenate them, and upload the final audio to R2.
-    
-    Args:
-        audio_urls: List of R2 URLs for each segment (None for failed segments)
-        novel_slug: Novel identifier
-        chapter_number: Chapter number
-        silence_gap_ms: Gap between segments in milliseconds
-    
-    Returns:
-        URL of the uploaded concatenated audio, or None if failed
-    """
-    try:
-        from pydub import AudioSegment
-    except ImportError:
-        logger.error("pydub not installed - cannot concatenate audio")
-        # Fallback: return first valid URL
-        for url in audio_urls:
-            if url:
-                return url
-        return None
-    
-    audio_segments = []
-
-    # Create silence segment for gaps
-    silence = AudioSegment.silent(duration=silence_gap_ms)
-
-    for idx, url in enumerate(audio_urls):
-        # Add silence gap between segments (not before the first one)
-        if idx > 0:
-            audio_segments.append(silence)
-
-        if url is None:
-            # Skip failed segments, add silence as placeholder
-            audio_segments.append(silence)
-            continue
-
-        try:
-            # Download audio bytes
-            audio_bytes = download_audio_from_url(url)
-            if audio_bytes is None:
-                logger.warning(f"Could not download segment {idx}, adding silence")
-                audio_segments.append(silence)
-                continue
-
-            # Load as AudioSegment
-            segment = AudioSegment.from_wav(io.BytesIO(audio_bytes))
-            audio_segments.append(segment)
-
-        except Exception as e:
-            logger.warning(f"Could not load segment {idx}: {e}, adding silence")
-            audio_segments.append(silence)
-    
-    if not audio_segments:
-        logger.error("No audio segments to concatenate")
-        return None
-    
-    # Concatenate all segments
-    logger.info(f"Concatenating {len(audio_segments)} segments...")
-    
-    final_audio = audio_segments[0]
-    for segment in audio_segments[1:]:
-        final_audio = final_audio + segment
-    
-    # Export to bytes
-    output_buffer = io.BytesIO()
-    final_audio.export(output_buffer, format="wav")
-    output_buffer.seek(0)
-    final_audio_bytes = output_buffer.read()
-    
-    logger.info(f"Concatenated audio: {len(final_audio_bytes)} bytes, {len(final_audio) / 1000:.2f}s")
-    
-    # Upload to R2
-    final_url = upload_chapter_audio_to_r2(
-        audio_bytes=final_audio_bytes,
-        novel_slug=novel_slug,
-        chapter_number=chapter_number
-    )
-    
-    return final_url
-
-
-def split_text_into_chunks(text: str, max_length: int = 500) -> list:
-    """
-    Split text into chunks for TTS processing.
-    Chunking is a product decision, not a model decision - stays in Render.
-    """
-    import re
-    
-    # Split by paragraphs first
-    paragraphs = re.split(r'\n\s*\n', text.strip())
-    
+def split_text_into_chunks(text: str, max_length: int = 500) -> list[str]:
+    paragraphs = re.split(r"\n\s*\n", text.strip())
     chunks = []
+
     for para in paragraphs:
         para = para.strip()
         if not para:
             continue
-        
-        # If paragraph is short enough, use as-is
+
         if len(para) <= max_length:
             chunks.append(para)
-        else:
-            # Split by sentences
-            sentences = re.split(r'(?<=[.!?])\s+', para)
-            current_chunk = ""
-            
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
-                    
-                if len(current_chunk) + len(sentence) + 1 <= max_length:
-                    current_chunk = (current_chunk + " " + sentence).strip()
-                else:
-                    if current_chunk:
-                        chunks.append(current_chunk)
-                    current_chunk = sentence
-            
-            if current_chunk:
-                chunks.append(current_chunk)
-    
-    # Fallback if no chunks were created
-    if not chunks and text.strip():
-        words = text.split()
-        current_chunk = ""
-        for word in words:
-            if len(current_chunk) + len(word) + 1 <= max_length:
-                current_chunk = (current_chunk + " " + word).strip()
+            continue
+
+        sentences = re.split(r"(?<=[.!?])\s+", para)
+        current = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(current) + len(sentence) + 1 <= max_length:
+                current = (current + " " + sentence).strip()
             else:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = word
-        if current_chunk:
-            chunks.append(current_chunk)
-    
+                if current:
+                    chunks.append(current)
+                current = sentence
+        if current:
+            chunks.append(current)
+
+    if chunks:
+        return chunks
+
+    words = text.split()
+    current = ""
+    for word in words:
+        if len(current) + len(word) + 1 <= max_length:
+            current = (current + " " + word).strip()
+        else:
+            if current:
+                chunks.append(current)
+            current = word
+    if current:
+        chunks.append(current)
     return chunks
