@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { Play, Pause, Volume2, VolumeX, X, Loader, ChevronUp, ChevronDown } from 'lucide-react';
 import './AudioPlayer.css';
 
-const API_URL = 'http://localhost:8001';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001/api';
 
 function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
     const audioRef = useRef(null);
@@ -39,13 +39,13 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         try {
             // Check if audio exists
             const statusRes = await fetch(
-                `${API_URL}/api/audio/status/${novelSlug}/${chapterNumber}`
+                `${API_URL}/audio/status/${novelSlug}/${chapterNumber}`
             );
             const status = await statusRes.json();
 
             if (status.exists) {
                 // Audio ready - load it
-                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                const url = `${API_URL}/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
                 setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
@@ -74,13 +74,13 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         try {
             const voice = settings?.voice || 'af_heart';
             const res = await fetch(
-                `${API_URL}/api/audio/generate/${novelSlug}/${chapterNumber}?voice=${voice}`,
+                `${API_URL}/audio/generate/${novelSlug}/${chapterNumber}?voice=${voice}`,
                 { method: 'POST' }
             );
             const data = await res.json();
 
             if (data.status === 'exists') {
-                const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                const url = `${API_URL}/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
                 setAudioUrl(url);
                 setAudioReady(true);
                 setIsLoading(false);
@@ -105,13 +105,13 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         const interval = setInterval(async () => {
             try {
                 const res = await fetch(
-                    `${API_URL}/api/audio/status/${novelSlug}/${chapterNumber}`
+                    `${API_URL}/audio/status/${novelSlug}/${chapterNumber}`
                 );
                 const status = await res.json();
 
                 if (status.exists) {
                     clearInterval(interval);
-                    const url = `${API_URL}/api/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
+                    const url = `${API_URL}/audio/stream/${novelSlug}/${chapterNumber}?t=${Date.now()}`;
                     setAudioUrl(url);
                     setAudioReady(true);
                     setIsLoading(false);

@@ -6,7 +6,7 @@ import SettingsModal, { getSettings } from '../components/ui/SettingsModal';
 import AudioPlayer from '../components/ui/AudioPlayer';
 import './ChapterReader.css';
 
-const API_URL = 'http://localhost:8001';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001/api';
 
 function ChapterReader() {
     const { slug, chapterId } = useParams();
@@ -47,7 +47,7 @@ function ChapterReader() {
     const fetchChunkTimings = async () => {
         try {
             console.log('Fetching timings for:', slug, chapterNum);
-            const res = await fetch(`${API_URL}/api/audio/timings/${slug}/${chapterNum}`);
+            const res = await fetch(`${API_URL}/audio/timings/${slug}/${chapterNum}`);
             if (res.ok) {
                 const data = await res.json();
                 console.log('Timings loaded:', data);
