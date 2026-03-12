@@ -17,36 +17,28 @@ NovelLabs bridges the gap between raw web scraped text and a premium audible exp
 
 ## Screenshots
 
-<div align="center">
-  <img src="docs/screenshots/home-dark.png" alt="NovelLabs Dark Mode Home">
-  <p><em>The default dark fantasy reading dashboard.</em></p>
-</div>
+![NovelLabs Dark Mode Home](docs/screenshots/home-dark.png)
+*The default dark fantasy reading dashboard.*
 
 ### Same app, two complete moods
-<div align="center">
-  <img src="docs/screenshots/home-dark.png" width="48%" alt="Dark Mode">
-  <img src="docs/screenshots/home-light.png" width="48%" alt="Light Mode">
-</div>
+
+![Dark Mode](docs/screenshots/home-dark.png) ![Light Mode](docs/screenshots/home-light.png)
 
 ### Library Overview
-<div align="center">
-  <img src="docs/screenshots/library-dark.png" alt="Personal Library">
-</div>
+
+![Personal Library](docs/screenshots/library-dark.png)
 
 ### Chapter Reader & Audio Handoff
-<div align="center">
-  <img src="docs/screenshots/reader-dark.png" alt="Reader Window synced with Audio highlighting">
-</div>
+
+![Reader Window synced with Audio highlighting](docs/screenshots/reader-dark.png)
 
 ### Novel Detail & Voice Workflow
-<div align="center">
-  <img src="docs/screenshots/novel-detail-qwen.png" alt="Novel specific processing options">
-</div>
+
+![Novel specific processing options](docs/screenshots/novel-detail-qwen.png)
 
 ### Generation Tracking
-<div align="center">
-  <img src="docs/screenshots/audio-generation-progress.png" alt="TTS Chunk Progress">
-</div>
+
+![TTS Chunk Progress](docs/screenshots/audio-generation-progress.png)
 
 ---
 
