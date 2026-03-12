@@ -17,28 +17,28 @@ NovelLabs bridges the gap between raw web scraped text and a premium audible exp
 
 ## Screenshots
 
-![NovelLabs Dark Mode Home](docs/screenshots/home-dark.png)
+![NovelLabs Dark Mode Home](screenshots/dark_homepage.png)
 *The default dark fantasy reading dashboard.*
 
 ### Same app, two complete moods
 
-![Dark Mode](docs/screenshots/home-dark.png) ![Light Mode](docs/screenshots/home-light.png)
+![Dark Mode](screenshots/dark_homepage.png) ![Light Mode](screenshots/light_homepage.png)
 
 ### Library Overview
 
-![Personal Library](docs/screenshots/library-dark.png)
+![Personal Library](screenshots/light_library.png)
 
 ### Chapter Reader & Audio Handoff
 
-![Reader Window synced with Audio highlighting](docs/screenshots/reader-dark.png)
+![Reader Window synced with Audio highlighting](screenshots/dark_chapterview+%20audio%20playback.png)
 
 ### Novel Detail & Voice Workflow
 
-![Novel specific processing options](docs/screenshots/novel-detail-qwen.png)
+![Novel specific processing options](screenshots/light_novelscrapper.png)
 
 ### Generation Tracking
 
-![TTS Chunk Progress](docs/screenshots/audio-generation-progress.png)
+![TTS Chunk Progress](screenshots/light_download_job%20viewer.png)
 
 ---
 
