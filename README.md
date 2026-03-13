@@ -56,9 +56,11 @@ Kokoro features incredibly natural narration with **more than 10 built-in voices
 Two voice demos are provided:
 
 - **af_heart** (American Female)
-  - (screenshots/audio_readme/kokoro/Chapter_0028.wav)
+  <br>
+  <audio controls src="screenshots/audio_readme/kokoro/Chapter_0028.wav"></audio>
 - **george** (British Male)
-  - (screenshots/audio_readme/kokoro/Chapter_1497.wav)
+  <br>
+  <audio controls src="screenshots/audio_readme/kokoro/Chapter_1497.wav"></audio>
 
 Feel free to try the other voices as well!
 
@@ -66,12 +68,20 @@ Feel free to try the other voices as well!
 The advanced Qwen3 integration allows for powerful zero-shot voice cloning. Provide a short reference audio of any voice (minimum 5 seconds), and NovelLabs will generate the entire audiobook in that exact voice!
 
 **Demo 1**
-- [Reference Audio](screenshots/audio_readme/qwen3-tts/audio1/qwen3_reference.wav)
-- [Generated Audiobook](screenshots/audio_readme/qwen3-tts/audio1/Chapter_0023.wav)
+- Reference Audio:
+  <br>
+  <audio controls src="screenshots/audio_readme/qwen3-tts/audio1/qwen3_reference.wav"></audio>
+- Generated Audiobook:
+  <br>
+  <audio controls src="screenshots/audio_readme/qwen3-tts/audio1/Chapter_0023.wav"></audio>
 
 **Demo 2**
-- [Reference Audio](screenshots/audio_readme/qwen3-tts/audio2/reference2.wav)
-- [Generated Audiobook](screenshots/audio_readme/qwen3-tts/audio2/Chapter_0079.wav)
+- Reference Audio:
+  <br>
+  <audio controls src="screenshots/audio_readme/qwen3-tts/audio2/reference2.wav"></audio>
+- Generated Audiobook:
+  <br>
+  <audio controls src="screenshots/audio_readme/qwen3-tts/audio2/Chapter_0079.wav"></audio>
 
 NOTE: the refernce audio has to be in .wav format.
 ---
