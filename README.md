@@ -42,6 +42,40 @@ NovelLabs bridges the gap between raw web scraped text and a premium audible exp
 
 ---
 
+## Local Imports
+
+You can import your own local novels, short stories, or books and seamlessly convert them into high-quality audiobooks. Your imported content and reading progress are saved both locally on your file system and securely tracked in the database for a fully private, offline experience.
+
+---
+
+## Audio Demos
+
+### Kokoro Voice Demos
+Kokoro features incredibly natural narration with **more than 10 built-in voices** to choose from out-of-the-box. 
+
+Two voice demos are provided:
+
+- **af_heart** (American Female)
+  - (screenshots/audio_readme/kokoro/Chapter_0028.wav)
+- **george** (British Male)
+  - (screenshots/audio_readme/kokoro/Chapter_1497.wav)
+
+Feel free to try the other voices as well!
+
+### Qwen3 Voice Cloning Demos
+The advanced Qwen3 integration allows for powerful zero-shot voice cloning. Provide a short reference audio of any voice (minimum 5 seconds), and NovelLabs will generate the entire audiobook in that exact voice!
+
+**Demo 1**
+- [Reference Audio](screenshots/audio_readme/qwen3-tts/audio1/qwen3_reference.wav)
+- [Generated Audiobook](screenshots/audio_readme/qwen3-tts/audio1/Chapter_0023.wav)
+
+**Demo 2**
+- [Reference Audio](screenshots/audio_readme/qwen3-tts/audio2/reference2.wav)
+- [Generated Audiobook](screenshots/audio_readme/qwen3-tts/audio2/Chapter_0079.wav)
+
+NOTE: the refernce audio has to be in .wav format.
+---
+
 ## Quick Start (Kokoro TTS)
 
 The fastest way to get started using the built-in Kokoro TTS engine. 
