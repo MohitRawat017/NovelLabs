@@ -17,28 +17,28 @@ NovelLabs bridges the gap between raw web scraped text and a premium audible exp
 
 ## Screenshots
 
-![NovelLabs Dark Mode Home](screenshots/dark_homepage.png)
+![NovelLabs Dark Mode Home](demos/dark_homepage.png)
 *The default dark fantasy reading dashboard.*
 
 ### Same app, two complete moods
 
-![Dark Mode](screenshots/dark_homepage.png) ![Light Mode](screenshots/light_homepage.png)
+![Dark Mode](demos/dark_homepage.png) ![Light Mode](demos/light_homepage.png)
 
 ### Library Overview
 
-![Personal Library](screenshots/light_library.png)
+![Personal Library](demos/light_library.png)
 
 ### Chapter Reader & Audio Handoff
 
-![Reader Window synced with Audio highlighting](screenshots/dark_chapterview+%20audio%20playback.png)
+![Reader Window synced with Audio highlighting](demos/dark_chapterview+%20audio%20playback.png)
 
 ### Novel Detail & Voice Workflow
 
-![Novel specific processing options](screenshots/light_novelscrapper.png)
+![Novel specific processing options](demos/light_novelscrapper.png)
 
 ### Generation Tracking
 
-![TTS Chunk Progress](screenshots/light_download_job%20viewer.png)
+![TTS Chunk Progress](demos/light_download_job%20viewer.png)
 
 ---
 
@@ -57,10 +57,10 @@ Two voice demos are provided:
 
 - **af_heart** (American Female)
   <br>
-  <audio controls src="screenshots/audio_readme/kokoro/Chapter_0028.wav"></audio>
+  <audio controls src="demos/audio_readme/kokoro/Chapter_0028.wav"></audio>
 - **george** (British Male)
   <br>
-  <audio controls src="screenshots/audio_readme/kokoro/Chapter_1497.wav"></audio>
+  <audio controls src="demos/audio_readme/kokoro/Chapter_1497.wav"></audio>
 
 Feel free to try the other voices as well!
 
@@ -70,18 +70,18 @@ The advanced Qwen3 integration allows for powerful zero-shot voice cloning. Prov
 **Demo 1**
 - Reference Audio:
   <br>
-  <audio controls src="screenshots/audio_readme/qwen3-tts/audio1/qwen3_reference.wav"></audio>
+  <audio controls src="demos/audio_readme/qwen3-tts/audio1/qwen3_reference.wav"></audio>
 - Generated Audiobook:
   <br>
-  <audio controls src="screenshots/audio_readme/qwen3-tts/audio1/Chapter_0023.wav"></audio>
+  <audio controls src="demos/audio_readme/qwen3-tts/audio1/Chapter_0023.wav"></audio>
 
 **Demo 2**
 - Reference Audio:
   <br>
-  <audio controls src="screenshots/audio_readme/qwen3-tts/audio2/reference2.wav"></audio>
+  <audio controls src="demos/audio_readme/qwen3-tts/audio2/reference2.wav"></audio>
 - Generated Audiobook:
   <br>
-  <audio controls src="screenshots/audio_readme/qwen3-tts/audio2/Chapter_0079.wav"></audio>
+  <audio controls src="demos/audio_readme/qwen3-tts/audio2/Chapter_0079.wav"></audio>
 
 NOTE: the refernce audio has to be in .wav format.
 ---
