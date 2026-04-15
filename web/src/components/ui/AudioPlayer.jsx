@@ -1,9 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Play, Pause, Volume2, VolumeX, X, Loader, ChevronUp, ChevronDown } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, X, Loader, ChevronUp, ChevronDown, StopCircle } from 'lucide-react';
 import { getAudioStatus, generateChapterAudio, getAudioStreamUrl } from '../../services/api';
+import { useScrapingJobs } from '../../context/ScrapingContext';
 import './AudioPlayer.css';
 
 function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
+    const {
+        pauseAudioGeneration,
+        resumeAudioGeneration,
+        cancelAudioGeneration
+    } = useScrapingJobs();
     const audioRef = useRef(null);
     const pollIntervalRef = useRef(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -24,9 +30,21 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         Boolean(status?.exists || status?.audio_only || status?.status === 'completed')
     ), []);
 
+    const isGenerationPaused = useCallback((status) => (
+        Boolean(status?.status === 'paused' || status?.job_status === 'paused')
+    ), []);
+
+    const isGenerationCancelled = useCallback((status) => (
+        Boolean(status?.status === 'cancelled' || status?.job_status === 'cancelled')
+    ), []);
+
     const isGenerationActive = useCallback((status) => (
         Boolean(status?.generating || status?.status === 'generating' || status?.job_status === 'generating')
     ), []);
+
+    const hasGenerationJob = useCallback((status) => (
+        isGenerationActive(status) || isGenerationPaused(status)
+    ), [isGenerationActive, isGenerationPaused]);
 
     const loadAudio = useCallback((slug, chapter) => {
         const url = `${getAudioStreamUrl(slug, chapter)}?t=${Date.now()}`;
@@ -51,6 +69,12 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         if (!status) {
             return null;
         }
+        if (isGenerationPaused(status)) {
+            return status.message || 'Generation paused';
+        }
+        if (isGenerationCancelled(status)) {
+            return status.message || 'Generation cancelled';
+        }
         if (status.message) {
             return status.message;
         }
@@ -61,7 +85,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             return 'Generating audio...';
         }
         return null;
-    }, [isGenerationActive]);
+    }, [isGenerationActive, isGenerationCancelled, isGenerationPaused]);
 
     const applyStatus = useCallback((status) => {
         setGenerationInfo(status || null);
@@ -78,6 +102,18 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             return 'error';
         }
 
+        if (isGenerationCancelled(status)) {
+            setGenerationStatus(buildGenerationMessage(status));
+            setIsLoading(false);
+            return 'cancelled';
+        }
+
+        if (isGenerationPaused(status)) {
+            setGenerationStatus(buildGenerationMessage(status));
+            setIsLoading(false);
+            return 'paused';
+        }
+
         if (isGenerationActive(status)) {
             setGenerationStatus(buildGenerationMessage(status));
             setIsLoading(false);
@@ -87,7 +123,16 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         setGenerationStatus(null);
         setIsLoading(false);
         return 'idle';
-    }, [buildGenerationMessage, chapterNumber, isAudioAvailable, isGenerationActive, loadAudio, novelSlug]);
+    }, [
+        buildGenerationMessage,
+        chapterNumber,
+        isAudioAvailable,
+        isGenerationActive,
+        isGenerationCancelled,
+        isGenerationPaused,
+        loadAudio,
+        novelSlug
+    ]);
 
     // Cleanup polling on unmount
     useEffect(() => {
@@ -114,7 +159,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         try {
             const status = await getAudioStatus(novelSlug, chapterNumber);
             const state = applyStatus(status);
-            if (state === 'generating') {
+            if (state === 'generating' || state === 'paused') {
                 pollForCompletion();
             }
         } catch (err) {
@@ -130,16 +175,19 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         setGenerationStatus('Starting TTS generation...');
 
         try {
-            const voice = settings?.voice || 'af_heart';
-            const data = await generateChapterAudio(novelSlug, chapterNumber, voice);
+            const provider = settings?.ttsProvider || 'kokoro';
+            const voice = provider === 'elevenlabs'
+                ? (settings?.elevenlabsVoice || '')
+                : (settings?.voice || 'af_heart');
+            const data = await generateChapterAudio(novelSlug, chapterNumber, voice, provider);
 
             if (data.status === 'exists') {
                 loadAudio(novelSlug, chapterNumber);
-            } else if (data.status === 'queued' || data.status === 'already_generating') {
+            } else if (data.status === 'queued' || data.status === 'already_generating' || data.status === 'paused') {
                 const status = await getAudioStatus(novelSlug, chapterNumber).catch(() => null);
                 if (status) {
                     const state = applyStatus(status);
-                    if (state !== 'ready') {
+                    if (state === 'generating' || state === 'paused') {
                         pollForCompletion();
                     }
                 } else {
@@ -175,6 +223,38 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                 setIsLoading(false);
             }
         }, 2000);
+    };
+
+    const handlePauseResumeGeneration = async () => {
+        try {
+            if (isGenerationPaused(generationInfo)) {
+                const updated = await resumeAudioGeneration(novelSlug, chapterNumber);
+                setGenerationInfo((prev) => ({ ...(prev || {}), ...(updated || {}), status: 'generating', job_status: 'generating' }));
+                setGenerationStatus(updated?.message || 'Generating audio...');
+                pollForCompletion();
+                return;
+            }
+
+            const updated = await pauseAudioGeneration(novelSlug, chapterNumber);
+            setGenerationInfo((prev) => ({ ...(prev || {}), ...(updated || {}), status: 'paused', job_status: 'paused' }));
+            setGenerationStatus(updated?.message || 'Generation paused');
+        } catch (err) {
+            console.error('Pause/resume generation error:', err);
+            setError(err?.message || 'Failed to update generation state');
+        }
+    };
+
+    const handleCancelGeneration = async () => {
+        try {
+            const updated = await cancelAudioGeneration(novelSlug, chapterNumber);
+            stopPolling();
+            setGenerationInfo((prev) => ({ ...(prev || {}), ...(updated || {}), status: 'cancelled', job_status: 'cancelled' }));
+            setGenerationStatus(updated?.message || 'Generation cancelled');
+            setIsLoading(false);
+        } catch (err) {
+            console.error('Cancel generation error:', err);
+            setError(err?.message || 'Failed to cancel generation');
+        }
     };
 
     // Audio event handlers
@@ -345,10 +425,12 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                             Retry Connection
                         </button>
                     </div>
-                ) : !audioReady && isGenerationActive(generationInfo) ? (
+                ) : !audioReady && hasGenerationJob(generationInfo) ? (
                     <div className="flex flex-col gap-4">
                         <div className="flex items-center gap-2 text-stone-800 dark:text-stone-200 font-medium text-sm">
-                            <Loader size={16} className="spin text-violet-500" />
+                            {isGenerationPaused(generationInfo)
+                                ? <Pause size={16} className="text-amber-500" />
+                                : <Loader size={16} className="spin text-violet-500" />}
                             <span>{generationStatus || 'Generating audio...'}</span>
                         </div>
 
@@ -383,9 +465,24 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                             </div>
                         </div>
 
-                        <button className="w-full py-2.5 mt-2 rounded-xl text-xs font-bold bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 text-stone-600 dark:text-stone-400 transition-all border border-stone-200/50 dark:border-white/5" onClick={checkAudioStatus}>
-                            Refresh Status
-                        </button>
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                            <button
+                                className="w-full py-2.5 rounded-xl text-xs font-bold bg-gradient-to-r from-violet-500 to-indigo-500 text-white hover:from-violet-400 hover:to-indigo-400 transition-all border border-transparent"
+                                onClick={handlePauseResumeGeneration}
+                            >
+                                {isGenerationPaused(generationInfo) ? 'Resume' : 'Pause'} Generation
+                            </button>
+                            <button
+                                className="w-full py-2.5 rounded-xl text-xs font-bold bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 text-stone-600 dark:text-stone-400 transition-all border border-stone-200/50 dark:border-white/5 flex items-center justify-center gap-1"
+                                onClick={handleCancelGeneration}
+                            >
+                                <StopCircle size={14} />
+                                Cancel
+                            </button>
+                            <button className="col-span-2 w-full py-2.5 rounded-xl text-xs font-bold bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 text-stone-600 dark:text-stone-400 transition-all border border-stone-200/50 dark:border-white/5" onClick={checkAudioStatus}>
+                                Refresh Status
+                            </button>
+                        </div>
                     </div>
                 ) : !audioReady ? (
                     <div className="flex flex-col items-center justify-center py-6 gap-4">

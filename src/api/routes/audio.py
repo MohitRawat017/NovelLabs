@@ -4,6 +4,7 @@ Audio API routes for the local TTS stack.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import io
 import logging
@@ -22,6 +23,7 @@ from ..config import (
     AUDIO_DIR,
     QWEN_TTS_API_STYLE,
     QWEN_TTS_LANGUAGE,
+    SUPPORTED_TTS_PROVIDERS,
     TTS_PROVIDER,
     TTS_VOICE_PROFILE_DIR,
 )
@@ -37,6 +39,12 @@ AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
 VOICE_PROFILE_ROOT = Path(TTS_VOICE_PROFILE_DIR)
 VOICE_PROFILE_ROOT.mkdir(parents=True, exist_ok=True)
 tts_jobs: dict = {}
+# Maximum seconds allowed for a single TTS chunk synthesis before treating it as hung
+_CHUNK_TIMEOUT_SECONDS = 300
+
+AUDIO_RUNNING_STATUSES = {"queued", "pending", "generating"}
+AUDIO_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+STALE_RESTART_AUDIO_ERROR = "Server restarted while generation was in progress"
 
 
 def _utc_now_iso() -> str:
@@ -118,6 +126,9 @@ def _build_job_status(job: Optional[dict]) -> dict:
 
 
 def _get_audio_paths(novel_slug: str, chapter_number: int) -> tuple[Path, Path]:
+    # Prevent path traversal via slug — only allow safe characters
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", novel_slug):
+        raise HTTPException(status_code=400, detail="Invalid novel slug format")
     audio_dir = AUDIO_ROOT / novel_slug
     audio_dir.mkdir(parents=True, exist_ok=True)
     return (
@@ -134,11 +145,22 @@ def _audio_job_key(novel_slug: str, chapter_number: int) -> str:
     return f"{novel_slug}_{chapter_number}"
 
 
-def _voice_profile_public(profile: Optional[dict]) -> dict:
+def _resolve_provider_name(provider_name: Optional[str] = None) -> str:
+    resolved = (provider_name or TTS_PROVIDER).strip().lower()
+    if resolved not in SUPPORTED_TTS_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported TTS provider '{resolved}'. Choose one of: kokoro, qwen3, elevenlabs.",
+        )
+    return resolved
+
+
+def _voice_profile_public(profile: Optional[dict], provider_name: Optional[str] = None) -> dict:
+    resolved_provider = _resolve_provider_name(provider_name)
     if not profile:
         return {
             "exists": False,
-            "provider": TTS_PROVIDER,
+            "provider": resolved_provider,
         }
     return {
         "exists": True,
@@ -161,6 +183,7 @@ def _get_novel_record(novel_slug: str) -> Optional[dict]:
 
 
 def _get_novel_tts_profile(novel_slug: str, provider_name: str = TTS_PROVIDER) -> Optional[dict]:
+    provider_name = _resolve_provider_name(provider_name)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -226,6 +249,7 @@ def _upsert_novel_tts_profile(
 
 
 def _delete_novel_tts_profile(novel_slug: str, provider_name: str = TTS_PROVIDER) -> Optional[dict]:
+    provider_name = _resolve_provider_name(provider_name)
     profile = _get_novel_tts_profile(novel_slug, provider_name)
     if not profile:
         return None
@@ -236,28 +260,33 @@ def _delete_novel_tts_profile(novel_slug: str, provider_name: str = TTS_PROVIDER
 
     ref_audio_path = profile.get("ref_audio_path")
     if ref_audio_path:
-        try:
-            Path(ref_audio_path).unlink(missing_ok=True)
-        except Exception:
-            logger.warning("Failed to remove saved voice profile audio: %s", ref_audio_path, exc_info=True)
+        target = Path(ref_audio_path).resolve()
+        if str(target).startswith(str(VOICE_PROFILE_ROOT.resolve())):
+            try:
+                target.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed to remove saved voice profile audio: %s", ref_audio_path, exc_info=True)
+        else:
+            logger.warning("Skipped deletion of ref_audio_path outside profile root: %s", ref_audio_path)
     return profile
 
 
-def _save_reference_audio(novel_slug: str, source_filename: str, content: bytes) -> Path:
+def _save_reference_audio(novel_slug: str, source_filename: str, content: bytes, provider_name: str) -> Path:
     extension = Path(source_filename).suffix.lower() or ".wav"
     if extension not in {".wav", ".mp3", ".flac", ".m4a", ".ogg"}:
         raise HTTPException(status_code=400, detail="Unsupported reference audio format")
 
     target_dir = VOICE_PROFILE_ROOT / novel_slug
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{TTS_PROVIDER}_reference{extension}"
+    target_path = target_dir / f"{_resolve_provider_name(provider_name)}_reference{extension}"
     target_path.write_bytes(content)
     return target_path
 
 
-def _validate_reference_audio_for_provider(content: bytes, source_filename: str) -> None:
+def _validate_reference_audio_for_provider(provider_name: str, content: bytes, source_filename: str) -> None:
+    provider_name = _resolve_provider_name(provider_name)
     extension = Path(source_filename).suffix.lower() or ".wav"
-    if TTS_PROVIDER == "qwen3" and QWEN_TTS_API_STYLE == "demo" and extension != ".wav":
+    if provider_name == "qwen3" and QWEN_TTS_API_STYLE == "demo" and extension != ".wav":
         raise HTTPException(
             status_code=400,
             detail="Qwen local demo mode currently expects a WAV reference clip. Convert your voice sample to .wav and upload it again.",
@@ -276,9 +305,10 @@ def _validate_reference_audio_for_provider(content: bytes, source_filename: str)
         ) from exc
 
 
-def _require_provider():
+def _require_provider(provider_name: Optional[str] = None):
+    resolved_provider = _resolve_provider_name(provider_name)
     try:
-        return get_tts_provider()
+        return get_tts_provider(resolved_provider)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -373,6 +403,52 @@ def _save_audio_metadata(
         )
 
 
+def _safe_progress(value: Optional[float]) -> float:
+    try:
+        return round(max(float(value or 0.0), 0.0), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_stale_restart_failure(status: Optional[str], error: Optional[str]) -> bool:
+    return status == "failed" and (error or "").strip() == STALE_RESTART_AUDIO_ERROR
+
+
+def _mark_audio_job_cancelled(
+    job_key: str,
+    novel_slug: str,
+    chapter_number: int,
+    voice: str,
+    provider_name: str,
+) -> None:
+    existing = tts_jobs.get(job_key, {})
+    cancelled_progress = _safe_progress(existing.get("progress"))
+    tts_jobs[job_key] = {
+        "status": "cancelled",
+        "provider": existing.get("provider") or provider_name,
+        "progress": cancelled_progress,
+        "error": "Cancelled by user",
+        "message": "Cancelled by user",
+        "current_chunk": existing.get("current_chunk"),
+        "completed_chunks": existing.get("completed_chunks", 0),
+        "total_chunks": existing.get("total_chunks"),
+        "current_chunk_started_monotonic": None,
+        "last_chunk_seconds": existing.get("last_chunk_seconds"),
+        "started_at": existing.get("started_at"),
+        "updated_at": _utc_now_iso(),
+        "started_monotonic": existing.get("started_monotonic"),
+    }
+    _save_audio_metadata(
+        novel_slug,
+        chapter_number,
+        voice,
+        "cancelled",
+        provider_name=provider_name,
+        progress=cancelled_progress,
+        error="Cancelled by user",
+    )
+
+
 def _replace_timings(novel_slug: str, chapter_number: int, chunks: list[dict]) -> None:
     with get_db() as conn:
         cursor = conn.cursor()
@@ -432,12 +508,27 @@ def _serialize_audio_job(row: Optional[dict], live_job: Optional[dict] = None) -
     audio_path, _ = _get_audio_paths(novel_slug, chapter_number)
     audio_exists = audio_path.exists()
     job_status = _build_job_status(live_job)
-    inferred_status = "completed" if audio_exists else (job_status.get("job_status") or row.get("status") or "pending")
+    stale_restart_failure = (
+        _is_stale_restart_failure(row.get("status"), row.get("error"))
+        and not audio_exists
+        and not job_status.get("job_status")
+    )
+
+    inferred_status = (
+        "completed"
+        if audio_exists
+        else (
+            "cancelled"
+            if stale_restart_failure
+            else (job_status.get("job_status") or row.get("status") or "pending")
+        )
+    )
     inferred_progress = (
         100.0
         if audio_exists
-        else float(job_status.get("progress", row.get("progress") or 0.0))
+        else (0.0 if stale_restart_failure else float(job_status.get("progress", row.get("progress") or 0.0)))
     )
+    inferred_error = None if stale_restart_failure else (row.get("error") or (live_job.get("error") if live_job else None))
 
     return {
         "job_id": f"audio:{novel_slug}:{chapter_number}",
@@ -448,11 +539,11 @@ def _serialize_audio_job(row: Optional[dict], live_job: Optional[dict] = None) -
         "chapter_title": row.get("chapter_title") or f"Chapter {chapter_number}",
         "status": inferred_status,
         "progress": round(max(inferred_progress, 0.0), 2),
-        "provider": row.get("provider") or (TTS_PROVIDER if inferred_status != "not_found" else None),
+        "provider": row.get("provider") or (live_job.get("provider") if live_job else None) or (TTS_PROVIDER if inferred_status != "not_found" else None),
         "voice": row.get("voice"),
         "audio_url": row.get("audio_url") or (_relative_audio_url(novel_slug, chapter_number) if audio_exists else None),
         "duration": row.get("duration") or live_job.get("duration") if live_job else row.get("duration"),
-        "error": row.get("error") or (live_job.get("error") if live_job else None),
+        "error": inferred_error,
         "exists": audio_exists,
         "current_chunk": job_status.get("current_chunk"),
         "completed_chunks": job_status.get("completed_chunks", 0),
@@ -460,7 +551,7 @@ def _serialize_audio_job(row: Optional[dict], live_job: Optional[dict] = None) -
         "elapsed_seconds": job_status.get("elapsed_seconds"),
         "average_chunk_seconds": job_status.get("average_chunk_seconds"),
         "estimated_remaining_seconds": job_status.get("estimated_remaining_seconds"),
-        "message": job_status.get("message") or row.get("status"),
+        "message": job_status.get("message") or inferred_status,
         "updated_at": job_status.get("updated_at") or row.get("updated_at") or row.get("created_at"),
         "started_at": job_status.get("started_at") or row.get("created_at"),
     }
@@ -475,19 +566,30 @@ def _sortable_timestamp(value) -> str:
 
 
 @router.get("/wake")
-async def wake_tts_service():
-    provider = _require_provider()
+async def wake_tts_service(provider: Optional[str] = None):
+    provider = _require_provider(provider)
     return {"status": "ready", **provider.health()}
 
 
+@router.post("/reset-provider")
+async def reset_tts_provider_cache():
+    """Clear the LRU-cached TTS provider instance.
+    Call this if the provider is stuck or after changing TTS config.
+    The next synthesis request will reload the model from scratch.
+    """
+    get_tts_provider.cache_clear()
+    return {"status": "ok", "message": "TTS provider cache cleared. The model will reload on the next request."}
+
+
 @router.get("/health")
-async def tts_health_check():
+async def tts_health_check(provider: Optional[str] = None):
+    resolved_provider = _resolve_provider_name(provider)
     try:
-        provider = get_tts_provider()
+        provider = get_tts_provider(resolved_provider)
     except Exception as exc:
         return {
             "tts_available": False,
-            "provider": TTS_PROVIDER,
+            "provider": resolved_provider,
             "error": str(exc),
         }
 
@@ -506,21 +608,18 @@ async def tts_health_check():
 
 
 @router.get("/voices")
-async def list_voices():
+async def list_voices(provider: Optional[str] = None):
+    resolved_provider = _resolve_provider_name(provider)
     try:
-        return get_tts_provider().list_voices()
+        return get_tts_provider(resolved_provider).list_voices()
     except Exception:
-        return ENGLISH_VOICES
+        return ENGLISH_VOICES if resolved_provider == "kokoro" else {}
 
 
 @router.get("/voices/flat")
-async def list_voices_flat():
-    provider = get_tts_provider()
-    voices = []
-    for group, group_voices in provider.list_voices().items():
-        for voice in group_voices:
-            voices.append({"id": voice, "group": group})
-    return voices
+async def list_voices_flat(provider: Optional[str] = None):
+    provider = _require_provider(provider)
+    return provider.list_voice_choices()
 
 
 @router.get("/stream/{novel_slug}/{chapter_number}")
@@ -558,13 +657,28 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
     job_status = _build_job_status(job)
 
     if row:
+        stale_restart_failure = (
+            _is_stale_restart_failure(row["status"], row["error"])
+            and not audio_exists
+            and not job_status.get("job_status")
+        )
+
         inferred_audio_url = row["audio_url"] or (_relative_audio_url(novel_slug, chapter_number) if audio_exists else None)
-        inferred_status = "completed" if audio_exists else (job_status.get("job_status") or row["status"])
+        inferred_status = (
+            "completed"
+            if audio_exists
+            else (
+                "cancelled"
+                if stale_restart_failure
+                else (job_status.get("job_status") or row["status"])
+            )
+        )
         live_progress = (
             100
             if audio_exists
-            else job_status.get("progress", row["progress"] or 0)
+            else (0 if stale_restart_failure else job_status.get("progress", row["progress"] or 0))
         )
+        inferred_error = None if stale_restart_failure else row["error"]
         return {
             "exists": audio_exists,
             "audio_only": audio_exists,
@@ -574,7 +688,7 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
             "audio_url": inferred_audio_url,
             "duration": row["duration"],
             "progress": live_progress,
-            "error": row["error"],
+            "error": inferred_error,
             "provider": row["provider"],
             "voice": row["voice"],
             **job_status,
@@ -590,6 +704,7 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         "duration": job.get("duration"),
         "progress": 100 if audio_exists else job_status.get("progress", job.get("progress", 0)),
         "error": job.get("error"),
+        "provider": job.get("provider"),
         **job_status,
     }
 
@@ -634,7 +749,6 @@ async def list_audio_jobs(novel_slug: Optional[str] = None):
             rows_by_key[job_key] = {
                 "novel_slug": live_novel_slug,
                 "chapter_number": live_chapter_number,
-                "provider": TTS_PROVIDER,
                 "voice": None,
                 "status": tts_jobs[job_key].get("status"),
                 "audio_url": None,
@@ -645,6 +759,7 @@ async def list_audio_jobs(novel_slug: Optional[str] = None):
                 "novel_title": None,
                 "created_at": None,
                 "updated_at": tts_jobs[job_key].get("updated_at"),
+                "provider": tts_jobs[job_key].get("provider") or TTS_PROVIDER,
             }
 
     jobs = [
@@ -704,18 +819,20 @@ async def get_chapter_timings(novel_slug: str, chapter_number: int):
 
 
 @router.get("/profile/{novel_slug}")
-async def get_novel_voice_profile(novel_slug: str):
-    provider = _require_provider()
-    profile = _get_novel_tts_profile(novel_slug)
-    payload = _voice_profile_public(profile)
+async def get_novel_voice_profile(novel_slug: str, provider: Optional[str] = None):
+    resolved_provider = _resolve_provider_name(provider)
+    provider = _require_provider(resolved_provider)
+    profile = _get_novel_tts_profile(novel_slug, resolved_provider)
+    payload = _voice_profile_public(profile, resolved_provider)
     payload["supports_voice_cloning"] = getattr(provider, "supports_voice_cloning", False)
-    payload["provider"] = provider.health().get("provider", TTS_PROVIDER)
+    payload["provider"] = provider.health().get("provider", resolved_provider)
     return payload
 
 
 @router.post("/profile/{novel_slug}")
 async def upload_novel_voice_profile(
     novel_slug: str,
+    provider: Optional[str] = None,
     audio: UploadFile = File(...),
     ref_text: str = Form(""),
     display_name: str = Form(""),
@@ -723,9 +840,10 @@ async def upload_novel_voice_profile(
     language: str = Form(QWEN_TTS_LANGUAGE),
     auto_transcribe: bool = Form(True),
 ):
-    provider = _require_provider()
+    resolved_provider = _resolve_provider_name(provider)
+    provider = _require_provider(resolved_provider)
     if not getattr(provider, "supports_voice_cloning", False):
-        raise HTTPException(status_code=400, detail=f"{TTS_PROVIDER} does not support saved voice profiles")
+        raise HTTPException(status_code=400, detail=f"{resolved_provider} does not support saved voice profiles")
 
     novel = _get_novel_record(novel_slug)
     if not novel:
@@ -736,9 +854,9 @@ async def upload_novel_voice_profile(
         raise HTTPException(status_code=400, detail="Reference audio file is empty")
     if len(content) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Reference audio must be 25MB or smaller")
-    _validate_reference_audio_for_provider(content, audio.filename or "reference.wav")
+    _validate_reference_audio_for_provider(resolved_provider, content, audio.filename or "reference.wav")
 
-    target_path = _save_reference_audio(novel_slug, audio.filename or "reference.wav", content)
+    target_path = _save_reference_audio(novel_slug, audio.filename or "reference.wav", content, resolved_provider)
     transcription = ref_text.strip()
     if not transcription and auto_transcribe:
         try:
@@ -748,50 +866,196 @@ async def upload_novel_voice_profile(
 
     profile = _upsert_novel_tts_profile(
         novel_id=novel["id"],
-        provider_name=TTS_PROVIDER,
+        provider_name=resolved_provider,
         voice_name=(voice_name or "novel-default").strip(),
         display_name=(display_name or audio.filename or "Novel Voice").strip(),
         ref_audio_path=str(target_path),
         ref_text=transcription or None,
         language=(language or QWEN_TTS_LANGUAGE).strip(),
     )
-    payload = _voice_profile_public(profile)
+    payload = _voice_profile_public(profile, resolved_provider)
     payload["supports_voice_cloning"] = True
     return payload
 
 
 @router.delete("/profile/{novel_slug}")
-async def delete_novel_voice_profile(novel_slug: str):
-    provider = _require_provider()
+async def delete_novel_voice_profile(novel_slug: str, provider: Optional[str] = None):
+    resolved_provider = _resolve_provider_name(provider)
+    provider = _require_provider(resolved_provider)
     if not getattr(provider, "supports_voice_cloning", False):
-        raise HTTPException(status_code=400, detail=f"{TTS_PROVIDER} does not support saved voice profiles")
+        raise HTTPException(status_code=400, detail=f"{resolved_provider} does not support saved voice profiles")
 
-    deleted = _delete_novel_tts_profile(novel_slug)
+    deleted = _delete_novel_tts_profile(novel_slug, resolved_provider)
     if not deleted:
         raise HTTPException(status_code=404, detail="No saved voice profile for this novel")
-    return {"status": "deleted", "provider": TTS_PROVIDER}
+    return {"status": "deleted", "provider": resolved_provider}
+
+
+@router.post("/pause/{novel_slug}/{chapter_number}")
+async def pause_audio_job(novel_slug: str, chapter_number: int):
+    job_key = _audio_job_key(novel_slug, chapter_number)
+    job = tts_jobs.get(job_key)
+    if not job:
+        raise HTTPException(status_code=404, detail="Live audio job not found")
+
+    current_status = job.get("status")
+    if current_status in AUDIO_TERMINAL_STATUSES:
+        return {"message": f"Job already {current_status}", "status": current_status}
+
+    if current_status == "paused":
+        return {"message": "Audio job already paused", "status": "paused"}
+
+    if current_status not in AUDIO_RUNNING_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Cannot pause audio job in '{current_status}' state")
+
+    progress = _safe_progress(job.get("progress"))
+    provider_name = job.get("provider") or TTS_PROVIDER
+    job.update(
+        {
+            "status": "paused",
+            "message": "Paused by user",
+            "current_chunk_started_monotonic": None,
+            "updated_at": _utc_now_iso(),
+        }
+    )
+    _save_audio_metadata(
+        novel_slug,
+        chapter_number,
+        job.get("voice") or "af_heart",
+        "paused",
+        provider_name=provider_name,
+        progress=progress,
+        error=None,
+    )
+    return {"message": "Audio job paused", "status": "paused"}
+
+
+@router.post("/resume/{novel_slug}/{chapter_number}")
+async def resume_audio_job(novel_slug: str, chapter_number: int):
+    job_key = _audio_job_key(novel_slug, chapter_number)
+    job = tts_jobs.get(job_key)
+    if not job:
+        raise HTTPException(status_code=404, detail="Live audio job not found")
+
+    current_status = job.get("status")
+    if current_status in AUDIO_TERMINAL_STATUSES:
+        return {"message": f"Job already {current_status}", "status": current_status}
+
+    if current_status != "paused":
+        return {"message": f"Job is {current_status}, nothing to resume", "status": current_status}
+
+    progress = _safe_progress(job.get("progress"))
+    provider_name = job.get("provider") or TTS_PROVIDER
+    job.update(
+        {
+            "status": "generating",
+            "message": "Resuming generation",
+            "updated_at": _utc_now_iso(),
+        }
+    )
+    _save_audio_metadata(
+        novel_slug,
+        chapter_number,
+        job.get("voice") or "af_heart",
+        "generating",
+        provider_name=provider_name,
+        progress=progress,
+        error=None,
+    )
+    return {"message": "Audio job resumed", "status": "generating"}
+
+
+@router.post("/cancel/{novel_slug}/{chapter_number}")
+async def cancel_audio_job(novel_slug: str, chapter_number: int):
+    job_key = _audio_job_key(novel_slug, chapter_number)
+    job = tts_jobs.get(job_key)
+
+    if not job:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT status, provider, voice, progress
+                FROM chapter_audio
+                WHERE novel_slug = ? AND chapter_number = ?
+                """,
+                (novel_slug, chapter_number),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Audio job not found")
+
+        current_status = row["status"]
+        if current_status in AUDIO_TERMINAL_STATUSES:
+            return {"message": f"Job already {current_status}", "status": current_status}
+
+        _save_audio_metadata(
+            novel_slug,
+            chapter_number,
+            row["voice"] or "af_heart",
+            "cancelled",
+            provider_name=row["provider"] or TTS_PROVIDER,
+            progress=_safe_progress(row["progress"]),
+            error="Cancelled by user",
+        )
+        return {
+            "message": "No live worker found. Marked stale audio job as cancelled",
+            "status": "cancelled",
+        }
+
+    current_status = job.get("status")
+    if current_status in AUDIO_TERMINAL_STATUSES:
+        return {"message": f"Job already {current_status}", "status": current_status}
+
+    _mark_audio_job_cancelled(
+        job_key,
+        novel_slug,
+        chapter_number,
+        job.get("voice") or "af_heart",
+        job.get("provider") or TTS_PROVIDER,
+    )
+    return {"message": "Audio job cancelled", "status": "cancelled"}
 
 
 @router.post("/generate/{novel_slug}/{chapter_number}")
 async def generate_chapter_audio(
     novel_slug: str,
     chapter_number: int,
+    background_tasks: BackgroundTasks,
+    provider: Optional[str] = None,
     voice: str = "af_heart",
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    force: bool = False,
 ):
-    provider = _require_provider()
-    profile = _get_novel_tts_profile(novel_slug)
+    job_key = _audio_job_key(novel_slug, chapter_number)
+    resolved_provider = _resolve_provider_name(provider)
+    provider = _require_provider(resolved_provider)
+    profile = _get_novel_tts_profile(novel_slug, resolved_provider)
     if getattr(provider, "supports_voice_cloning", False) and not profile:
         raise HTTPException(
             status_code=400,
-            detail="No saved Qwen voice profile for this novel. Upload one from the novel page first.",
+            detail=f"No saved {resolved_provider} voice profile for this novel. Upload one from the novel page first.",
         )
+
+    live_job = tts_jobs.get(job_key)
+    if live_job and not force:
+        live_status = live_job.get("status")
+        if live_status in {"generating", "paused"}:
+            return {
+                "status": "paused" if live_status == "paused" else "already_generating",
+                "message": (
+                    "Audio generation is paused"
+                    if live_status == "paused"
+                    else "Audio generation in progress"
+                ),
+                "provider": live_job.get("provider") or resolved_provider,
+            }
 
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT status, audio_url, duration
+            SELECT status, audio_url, duration, provider
             FROM chapter_audio
             WHERE novel_slug = ? AND chapter_number = ?
             """,
@@ -800,31 +1064,55 @@ async def generate_chapter_audio(
         existing = cursor.fetchone()
 
     if existing:
-        if existing["status"] == "completed":
+        if existing["status"] == "completed" and existing["provider"] == resolved_provider and not force:
             return {
                 "status": "exists",
                 "message": "Audio already generated",
                 "audio_url": existing["audio_url"],
                 "duration": existing["duration"],
+                "provider": resolved_provider,
             }
-        if existing["status"] == "generating":
-            return {"status": "already_generating", "message": "Audio generation in progress"}
+        if existing["status"] in {"generating", "paused"} and not force:
+            return {
+                "status": "paused" if existing["status"] == "paused" else "already_generating",
+                "message": (
+                    "Audio generation is paused"
+                    if existing["status"] == "paused"
+                    else "Audio generation in progress"
+                ),
+                "provider": existing["provider"] or resolved_provider,
+            }
+        if force:
+            # Signal the old background thread to stop before we start a new one.
+            # Without this, two concurrent synthesis calls share the same KPipeline,
+            # which can cause CUDA crashes or corrupted audio.
+            old_job = tts_jobs.get(job_key)
+            if old_job and old_job.get("status") in (AUDIO_RUNNING_STATUSES | {"paused"}):
+                old_job["status"] = "cancelled"
+                logger.info("force=True: signalled old job to cancel for %s ch%s", novel_slug, chapter_number)
+                # Give the background thread a moment to notice the cancellation
+                import asyncio as _asyncio
+                await _asyncio.sleep(0.5)
+            tts_jobs.pop(job_key, None)
+            logger.info("force=True: cleared stuck job state for %s ch%s", novel_slug, chapter_number)
 
     _, content = _load_chapter_content(novel_slug, chapter_number)
+    provider_name = provider.health().get("provider", resolved_provider)
     _save_audio_metadata(
         novel_slug,
         chapter_number,
         voice,
         "generating",
-        provider_name=provider.health().get("provider", TTS_PROVIDER),
+        provider_name=provider_name,
         progress=0.0,
         error=None,
     )
 
-    job_key = _audio_job_key(novel_slug, chapter_number)
     now_iso = _utc_now_iso()
     tts_jobs[job_key] = {
         "status": "generating",
+        "provider": provider_name,
+        "voice": voice,
         "progress": 0,
         "message": "Queued for generation",
         "current_chunk": 0,
@@ -836,22 +1124,30 @@ async def generate_chapter_audio(
         "updated_at": now_iso,
         "started_monotonic": time.monotonic(),
     }
-    background_tasks.add_task(run_tts_generation, novel_slug, chapter_number, content, voice, job_key)
+    background_tasks.add_task(run_tts_generation, novel_slug, chapter_number, content, voice, job_key, provider_name)
 
     return {
         "status": "queued",
         "message": f"Audio generation started for {novel_slug} chapter {chapter_number}",
         "voice": voice,
+        "provider": provider_name,
     }
 
 
-def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: str, job_key: str):
+def run_tts_generation(
+    novel_slug: str,
+    chapter_number: int,
+    text: str,
+    voice: str,
+    job_key: str,
+    provider_name: str,
+):
     import soundfile as sf
 
-    provider = get_tts_provider()
+    provider = get_tts_provider(provider_name)
     audio_path, timing_path = _get_audio_paths(novel_slug, chapter_number)
-    profile = _get_novel_tts_profile(novel_slug)
-    provider_name = provider.health().get("provider", TTS_PROVIDER)
+    profile = _get_novel_tts_profile(novel_slug, provider_name)
+    provider_name = provider.health().get("provider", provider_name)
 
     try:
         chunks = split_text_into_chunks(text, max_length=500)
@@ -861,6 +1157,8 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
         existing_job = tts_jobs.get(job_key, {})
         tts_jobs[job_key] = {
             "status": "generating",
+            "provider": provider_name,
+            "voice": voice,
             "progress": 0,
             "message": "Preparing audio chunks",
             "current_chunk": 0,
@@ -879,12 +1177,42 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
         silence_duration = 0.3
         silence = np.zeros(int(provider.sample_rate * silence_duration), dtype=np.float32)
 
-        for idx, chunk in enumerate(chunks):
+        _MAX_PAUSE_SECONDS = 1800  # 30 minutes
+
+        # Single executor for all chunk synthesis — avoids creating/destroying 85 OS threads.
+        _synth_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+          for idx, chunk in enumerate(chunks):
+            pause_started = time.monotonic()
+            while tts_jobs.get(job_key, {}).get("status") == "paused":
+                if time.monotonic() - pause_started > _MAX_PAUSE_SECONDS:
+                    logger.warning(
+                        "Pause timeout (%ds) exceeded for %s ch%s — auto-cancelling",
+                        _MAX_PAUSE_SECONDS, novel_slug, chapter_number,
+                    )
+                    _mark_audio_job_cancelled(
+                        job_key, novel_slug, chapter_number, voice, provider_name,
+                    )
+                    return
+                time.sleep(0.4)
+
+            if tts_jobs.get(job_key, {}).get("status") == "cancelled":
+                _mark_audio_job_cancelled(
+                    job_key,
+                    novel_slug,
+                    chapter_number,
+                    voice,
+                    provider_name,
+                )
+                return
+
             progress = round((idx / len(chunks)) * 90, 2)
             chunk_started_monotonic = time.monotonic()
             tts_jobs[job_key].update(
                 {
                     "status": "generating",
+                    "provider": provider_name,
+                    "voice": voice,
                     "progress": progress,
                     "message": f"Synthesizing chunk {idx + 1} of {len(chunks)}",
                     "current_chunk": idx + 1,
@@ -911,7 +1239,27 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
                 progress=progress,
             )
 
-            audio = provider.synthesize(chunk.strip(), voice, profile=profile)
+            # Run synthesis with a hard timeout to prevent model hangs.
+            _future = _synth_executor.submit(provider.synthesize, chunk.strip(), voice, profile=profile)
+            try:
+                audio = _future.result(timeout=_CHUNK_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                _future.cancel()
+                raise RuntimeError(
+                    f"TTS synthesis timed out after {_CHUNK_TIMEOUT_SECONDS}s on chunk "
+                    f"{idx + 1}/{len(chunks)}. The model may be stuck — use POST /api/audio/reset-provider "
+                    "and restart the backend to recover."
+                )
+            if tts_jobs.get(job_key, {}).get("status") == "cancelled":
+                _mark_audio_job_cancelled(
+                    job_key,
+                    novel_slug,
+                    chapter_number,
+                    voice,
+                    provider_name,
+                )
+                return
+
             if audio.ndim > 1:
                 audio = audio.squeeze()
             audio = np.asarray(audio, dtype=np.float32)
@@ -923,6 +1271,8 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
             tts_jobs[job_key].update(
                 {
                     "status": "generating",
+                    "provider": provider_name,
+                    "voice": voice,
                     "progress": completed_progress,
                     "message": (
                         "Combining audio chunks"
@@ -955,6 +1305,16 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
                 progress=completed_progress,
             )
 
+            if tts_jobs.get(job_key, {}).get("status") == "cancelled":
+                _mark_audio_job_cancelled(
+                    job_key,
+                    novel_slug,
+                    chapter_number,
+                    voice,
+                    provider_name,
+                )
+                return
+
             chunk_timings.append(
                 {
                     "index": idx,
@@ -966,6 +1326,8 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
             )
             audio_segments.append(audio)
             current_time += duration + silence_duration
+        finally:
+            _synth_executor.shutdown(wait=True)
 
         if not audio_segments:
             raise ValueError("No audio segments were generated")
@@ -977,6 +1339,16 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
                 combined.append(silence)
         final_audio = np.concatenate(combined)
         total_duration = len(final_audio) / provider.sample_rate
+
+        if tts_jobs.get(job_key, {}).get("status") == "cancelled":
+            _mark_audio_job_cancelled(
+                job_key,
+                novel_slug,
+                chapter_number,
+                voice,
+                provider_name,
+            )
+            return
 
         sf.write(str(audio_path), final_audio, provider.sample_rate)
 
@@ -1007,6 +1379,8 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
         )
         tts_jobs[job_key] = {
             "status": "completed",
+            "provider": provider_name,
+            "voice": voice,
             "progress": 100,
             "message": "Audio ready",
             "duration": round(total_duration, 3),
@@ -1040,6 +1414,8 @@ def run_tts_generation(novel_slug: str, chapter_number: int, text: str, voice: s
         failed_existing_job = tts_jobs.get(job_key, {})
         tts_jobs[job_key] = {
             "status": "failed",
+            "provider": provider_name,
+            "voice": voice,
             "progress": 0,
             "error": str(exc),
             "message": "Audio generation failed",

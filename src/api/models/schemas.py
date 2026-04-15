@@ -89,7 +89,7 @@ class ScrapeRequest(BaseModel):
 
 
 class ScrapeStatusResponse(BaseModel):
-    status: str  # 'pending', 'running', 'completed', 'failed'
+    status: str  # 'pending', 'detecting', 'running', 'paused', 'completed', 'failed', 'cancelled'
     current_chapter: int
     total_chapters: int
     novel_title: Optional[str]

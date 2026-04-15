@@ -4,10 +4,17 @@ import {
     listScrapeJobs,
     getScrapeStatus,
     cancelScrapeJob,
+    pauseScrapeJob,
+    resumeScrapeJob,
     removeScrapeJob,
+    pauseAudioJob,
+    resumeAudioJob,
+    cancelAudioJob,
 } from '../services/api';
 
 const ScrapingContext = createContext();
+const SCRAPER_ACTIVE_STATUSES = new Set(['pending', 'running', 'detecting', 'paused']);
+const AUDIO_ACTIVE_STATUSES = new Set(['queued', 'pending', 'generating', 'paused']);
 
 export function useScrapingJobs() {
     const context = useContext(ScrapingContext);
@@ -63,6 +70,69 @@ export function ScrapingProvider({ children }) {
         }
     }, []);
 
+    const pauseJob = useCallback(async (jobId) => {
+        try {
+            await pauseScrapeJob(jobId);
+            setJobs(prev => ({
+                ...prev,
+                [jobId]: { ...prev[jobId], status: 'paused', error: null }
+            }));
+        } catch (err) {
+            console.error('Failed to pause job:', err);
+        }
+    }, []);
+
+    const resumeJob = useCallback(async (jobId) => {
+        try {
+            await resumeScrapeJob(jobId);
+            setJobs(prev => ({
+                ...prev,
+                [jobId]: { ...prev[jobId], status: 'running', error: null }
+            }));
+        } catch (err) {
+            console.error('Failed to resume job:', err);
+        }
+    }, []);
+
+    const pauseAudioGeneration = useCallback(async (novelSlug, chapterNumber) => {
+        try {
+            await pauseAudioJob(novelSlug, chapterNumber);
+            setAudioJobs(prev => prev.map(job => (
+                job.novel_slug === novelSlug && job.chapter_number === chapterNumber
+                    ? { ...job, status: 'paused', message: 'Paused by user' }
+                    : job
+            )));
+        } catch (err) {
+            console.error('Failed to pause audio job:', err);
+        }
+    }, []);
+
+    const resumeAudioGeneration = useCallback(async (novelSlug, chapterNumber) => {
+        try {
+            await resumeAudioJob(novelSlug, chapterNumber);
+            setAudioJobs(prev => prev.map(job => (
+                job.novel_slug === novelSlug && job.chapter_number === chapterNumber
+                    ? { ...job, status: 'generating', message: 'Resuming generation' }
+                    : job
+            )));
+        } catch (err) {
+            console.error('Failed to resume audio job:', err);
+        }
+    }, []);
+
+    const cancelAudioGeneration = useCallback(async (novelSlug, chapterNumber) => {
+        try {
+            await cancelAudioJob(novelSlug, chapterNumber);
+            setAudioJobs(prev => prev.map(job => (
+                job.novel_slug === novelSlug && job.chapter_number === chapterNumber
+                    ? { ...job, status: 'cancelled', message: 'Cancelled by user', error: 'Cancelled by user' }
+                    : job
+            )));
+        } catch (err) {
+            console.error('Failed to cancel audio job:', err);
+        }
+    }, []);
+
     // Remove a job from tracking (and from server)
     const removeJob = useCallback(async (jobId) => {
         try {
@@ -95,7 +165,7 @@ export function ScrapingProvider({ children }) {
     // Poll for updates on active jobs
     useEffect(() => {
         const activeJobs = Object.entries(jobs).filter(
-            ([, job]) => job.status === 'pending' || job.status === 'running' || job.status === 'detecting'
+            ([, job]) => SCRAPER_ACTIVE_STATUSES.has(job.status)
         );
 
         if (activeJobs.length === 0) {
@@ -129,7 +199,7 @@ export function ScrapingProvider({ children }) {
 
     useEffect(() => {
         const activeAudioJobs = audioJobs.filter(
-            (job) => job.status === 'queued' || job.status === 'pending' || job.status === 'generating'
+            (job) => AUDIO_ACTIVE_STATUSES.has(job.status)
         );
 
         if (activeAudioJobs.length === 0) {
@@ -153,10 +223,10 @@ export function ScrapingProvider({ children }) {
 
     // Count active jobs
     const activeScraperJobCount = Object.values(jobs).filter(
-        job => job.status === 'pending' || job.status === 'running' || job.status === 'detecting'
+        job => SCRAPER_ACTIVE_STATUSES.has(job.status)
     ).length;
     const activeAudioJobCount = audioJobs.filter(
-        (job) => job.status === 'queued' || job.status === 'pending' || job.status === 'generating'
+        (job) => AUDIO_ACTIVE_STATUSES.has(job.status)
     ).length;
     const activeJobCount = activeScraperJobCount + activeAudioJobCount;
 
@@ -169,8 +239,13 @@ export function ScrapingProvider({ children }) {
             isOpen,
             addJob,
             cancelJob,
+            pauseJob,
+            resumeJob,
             removeJob,
             refreshAudioJobs,
+            pauseAudioGeneration,
+            resumeAudioGeneration,
+            cancelAudioGeneration,
             togglePanel,
             closePanel
         }}>

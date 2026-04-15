@@ -38,7 +38,10 @@ function Home() {
     useEffect(() => {
         const loadHomeData = async () => {
             try {
-                const [novelsResult, audioHealthResult] = await Promise.allSettled([getNovels(), getAudioHealth()]);
+                const [novelsResult, audioHealthResult] = await Promise.allSettled([
+                    getNovels(),
+                    getAudioHealth(settings.ttsProvider || 'kokoro'),
+                ]);
                 setNovels(novelsResult.status === 'fulfilled' && Array.isArray(novelsResult.value?.novels) ? novelsResult.value.novels : []);
 
                 if (audioHealthResult.status === 'fulfilled') {
@@ -54,7 +57,7 @@ function Home() {
         };
 
         loadHomeData();
-    }, []);
+    }, [settings.ttsProvider]);
 
     useEffect(() => {
         setSettings((previous) => ({ ...previous, theme }));

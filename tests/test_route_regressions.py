@@ -265,6 +265,38 @@ class TestRouteRegressions(unittest.TestCase):
         self.assertEqual(payload["progress"], 63.0)
         self.assertEqual(payload["completed_chunks"], 5)
 
+    def test_audio_status_hides_stale_restart_failure_error(self):
+        with self.database.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO chapter_audio (novel_slug, chapter_number, provider, voice, status, audio_url, duration, progress, error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    "route-regression-novel",
+                    8,
+                    "kokoro",
+                    "af_heart",
+                    "failed",
+                    None,
+                    None,
+                    55.0,
+                    "Server restarted while generation was in progress",
+                ),
+            )
+
+        with TestClient(self.main.app) as client:
+            response = client.get("/api/audio/status/route-regression-novel/8")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["exists"])
+        self.assertFalse(payload["generating"])
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["progress"], 0)
+        self.assertIsNone(payload["error"])
+
     def test_chapter_list_includes_audio_provider_metadata(self):
         with self.database.get_db() as conn:
             cursor = conn.cursor()
@@ -369,6 +401,103 @@ class TestRouteRegressions(unittest.TestCase):
         self.assertEqual(job["completed_chunks"], 4)
         self.assertEqual(job["total_chunks"], 7)
         self.assertEqual(job["status"], "generating")
+
+    def test_audio_pause_and_resume_routes_update_live_job_and_db(self):
+        audio_module = importlib.import_module("src.api.routes.audio")
+        audio_module.tts_jobs["route-regression-novel_1"] = {
+            "status": "generating",
+            "provider": "kokoro",
+            "voice": "af_heart",
+            "progress": 44.5,
+            "message": "Synthesizing chunk 2 of 5",
+            "current_chunk": 2,
+            "completed_chunks": 1,
+            "total_chunks": 5,
+            "started_at": "2026-03-12T00:00:00",
+            "updated_at": "2026-03-12T00:00:05",
+            "started_monotonic": 1.0,
+        }
+
+        with TestClient(self.main.app) as client:
+            pause_response = client.post("/api/audio/pause/route-regression-novel/1")
+
+            self.assertEqual(pause_response.status_code, 200)
+            self.assertEqual(pause_response.json()["status"], "paused")
+            self.assertEqual(audio_module.tts_jobs["route-regression-novel_1"]["status"], "paused")
+
+            resume_response = client.post("/api/audio/resume/route-regression-novel/1")
+
+        self.assertEqual(resume_response.status_code, 200)
+        self.assertEqual(resume_response.json()["status"], "generating")
+        self.assertEqual(audio_module.tts_jobs["route-regression-novel_1"]["status"], "generating")
+
+        with self.database.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT status, progress, provider, voice
+                FROM chapter_audio
+                WHERE novel_slug = ? AND chapter_number = ?
+                """,
+                ("route-regression-novel", 1),
+            )
+            row = cursor.fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "generating")
+        self.assertEqual(row["provider"], "kokoro")
+        self.assertEqual(row["voice"], "af_heart")
+        self.assertGreaterEqual(float(row["progress"]), 44.5)
+
+    def test_audio_cancel_route_marks_stale_db_job_cancelled(self):
+        with self.database.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO chapter_audio (novel_slug, chapter_number, provider, voice, status, audio_url, duration, progress, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    "route-regression-novel",
+                    9,
+                    "kokoro",
+                    "af_heart",
+                    "pending",
+                    None,
+                    None,
+                    31.0,
+                ),
+            )
+
+        with TestClient(self.main.app) as client:
+            response = client.post("/api/audio/cancel/route-regression-novel/9")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "cancelled")
+
+        with self.database.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT status, error, progress
+                FROM chapter_audio
+                WHERE novel_slug = ? AND chapter_number = ?
+                """,
+                ("route-regression-novel", 9),
+            )
+            row = cursor.fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "cancelled")
+        self.assertEqual(row["error"], "Cancelled by user")
+        self.assertGreaterEqual(float(row["progress"]), 31.0)
+
+    def test_audio_pause_route_returns_404_without_live_job(self):
+        with TestClient(self.main.app) as client:
+            response = client.post("/api/audio/pause/route-regression-novel/77")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("Live audio job not found", response.json()["detail"])
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ class TestBackendImports(unittest.TestCase):
         self.previous_env = {
             "NOVELLABS_ENV_FILE": os.environ.get("NOVELLABS_ENV_FILE"),
             "TTS_PROVIDER": os.environ.get("TTS_PROVIDER"),
+            "ELEVENLABS_API_KEY": os.environ.get("ELEVENLABS_API_KEY"),
             "DATABASE_BACKEND": os.environ.get("DATABASE_BACKEND"),
             "AUDIO_STORAGE_BACKEND": os.environ.get("AUDIO_STORAGE_BACKEND"),
         }
@@ -69,6 +70,20 @@ class TestBackendImports(unittest.TestCase):
 
             config = importlib.import_module("src.api.config")
             self.assertEqual(config.TTS_PROVIDER, "qwen3")
+
+    def test_config_accepts_elevenlabs_provider_from_env_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("TTS_PROVIDER=elevenlabs\n", encoding="utf-8")
+
+            os.environ["NOVELLABS_ENV_FILE"] = str(env_path)
+            os.environ["TTS_PROVIDER"] = "kokoro"
+
+            for module_name in ["src.api.config", "src.api.services.tts_provider"]:
+                sys.modules.pop(module_name, None)
+
+            config = importlib.import_module("src.api.config")
+            self.assertEqual(config.TTS_PROVIDER, "elevenlabs")
 
     def test_sqlite_mode_forces_local_audio_storage(self):
         with tempfile.TemporaryDirectory() as temp_dir:

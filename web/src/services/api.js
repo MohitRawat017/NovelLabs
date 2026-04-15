@@ -33,6 +33,14 @@ async function fetchAPI(endpoint, options = {}) {
     return response.json();
 }
 
+function withProviderQuery(endpoint, provider) {
+    if (!provider) {
+        return endpoint;
+    }
+    const separator = endpoint.includes('?') ? '&' : '?';
+    return `${endpoint}${separator}provider=${encodeURIComponent(provider)}`;
+}
+
 // ================== Novels API ==================
 
 export async function getNovels(params = {}) {
@@ -133,22 +141,34 @@ export async function cancelScrapeJob(jobId) {
     return fetchAPI(`/scraper/cancel/${jobId}`, { method: 'POST' });
 }
 
+export async function pauseScrapeJob(jobId) {
+    return fetchAPI(`/scraper/pause/${jobId}`, { method: 'POST' });
+}
+
+export async function resumeScrapeJob(jobId) {
+    return fetchAPI(`/scraper/resume/${jobId}`, { method: 'POST' });
+}
+
 export async function removeScrapeJob(jobId) {
     return fetchAPI(`/scraper/job/${jobId}`, { method: 'DELETE' });
 }
 
 // ================== Audio API ==================
 
-export async function getVoices() {
-    return fetchAPI('/audio/voices');
+export async function getVoices(provider = null) {
+    return fetchAPI(withProviderQuery('/audio/voices', provider));
+}
+
+export async function getVoicesFlat(provider = null) {
+    return fetchAPI(withProviderQuery('/audio/voices/flat', provider));
 }
 
 export async function getAudioStatus(slug, chapterNumber) {
     return fetchAPI(`/audio/status/${slug}/${chapterNumber}`);
 }
 
-export async function getAudioHealth() {
-    return fetchAPI('/audio/health');
+export async function getAudioHealth(provider = null) {
+    return fetchAPI(withProviderQuery('/audio/health', provider));
 }
 
 export async function listAudioJobs(slug = null) {
@@ -156,11 +176,23 @@ export async function listAudioJobs(slug = null) {
     return fetchAPI(`/audio/jobs${query}`);
 }
 
-export async function getNovelVoiceProfile(slug) {
-    return fetchAPI(`/audio/profile/${slug}`);
+export async function pauseAudioJob(slug, chapterNumber) {
+    return fetchAPI(`/audio/pause/${slug}/${chapterNumber}`, { method: 'POST' });
 }
 
-export async function uploadNovelVoiceProfile(slug, { file, refText = '', displayName = '', voiceName = 'novel-default', language = 'English' }) {
+export async function resumeAudioJob(slug, chapterNumber) {
+    return fetchAPI(`/audio/resume/${slug}/${chapterNumber}`, { method: 'POST' });
+}
+
+export async function cancelAudioJob(slug, chapterNumber) {
+    return fetchAPI(`/audio/cancel/${slug}/${chapterNumber}`, { method: 'POST' });
+}
+
+export async function getNovelVoiceProfile(slug, provider = null) {
+    return fetchAPI(withProviderQuery(`/audio/profile/${slug}`, provider));
+}
+
+export async function uploadNovelVoiceProfile(slug, { file, refText = '', displayName = '', voiceName = 'novel-default', language = 'English', provider = null }) {
     const form = new FormData();
     form.append('audio', file);
     form.append('ref_text', refText);
@@ -168,18 +200,18 @@ export async function uploadNovelVoiceProfile(slug, { file, refText = '', displa
     form.append('voice_name', voiceName);
     form.append('language', language);
 
-    return fetchAPI(`/audio/profile/${slug}`, {
+    return fetchAPI(withProviderQuery(`/audio/profile/${slug}`, provider), {
         method: 'POST',
         body: form,
     });
 }
 
-export async function deleteNovelVoiceProfile(slug) {
-    return fetchAPI(`/audio/profile/${slug}`, { method: 'DELETE' });
+export async function deleteNovelVoiceProfile(slug, provider = null) {
+    return fetchAPI(withProviderQuery(`/audio/profile/${slug}`, provider), { method: 'DELETE' });
 }
 
-export async function generateChapterAudio(slug, chapterNumber, voice = 'af_heart') {
-    return fetchAPI(`/audio/generate/${slug}/${chapterNumber}?voice=${voice}`, {
+export async function generateChapterAudio(slug, chapterNumber, voice = 'af_heart', provider = null) {
+    return fetchAPI(withProviderQuery(`/audio/generate/${slug}/${chapterNumber}?voice=${encodeURIComponent(voice)}`, provider), {
         method: 'POST',
     });
 }

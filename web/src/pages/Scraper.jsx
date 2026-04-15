@@ -1,14 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Sparkles, Play, Loader, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
+import { Sparkles, Play, Loader, CheckCircle, XCircle, RefreshCw, Pause, StopCircle } from 'lucide-react';
 import { startScraping, getScrapeStatus } from '../services/api';
 import { useScrapingJobs } from '../context/ScrapingContext';
 import './Scraper.css';
 
 function Scraper() {
     const navigate = useNavigate();
-    const { addJob } = useScrapingJobs();
+    const { addJob, pauseJob, resumeJob, cancelJob } = useScrapingJobs();
     const [url, setUrl] = useState('');
     const [startChapter, setStartChapter] = useState(1);
     const [endChapter, setEndChapter] = useState('');
@@ -20,13 +20,13 @@ function Scraper() {
 
     // Poll for progress updates
     useEffect(() => {
-        if (jobId && progress?.status !== 'completed' && progress?.status !== 'failed') {
+        if (jobId && !['completed', 'failed', 'cancelled'].includes(progress?.status)) {
             pollIntervalRef.current = setInterval(async () => {
                 try {
                     const status = await getScrapeStatus(jobId);
                     setProgress(status);
 
-                    if (status.status === 'completed' || status.status === 'failed') {
+                    if (['completed', 'failed', 'cancelled'].includes(status.status)) {
                         clearInterval(pollIntervalRef.current);
                         setIsLoading(false);
                     }
@@ -38,6 +38,41 @@ function Scraper() {
             return () => clearInterval(pollIntervalRef.current);
         }
     }, [jobId, progress?.status]);
+
+    const handlePauseResume = async () => {
+        if (!jobId || !progress) {
+            return;
+        }
+
+        try {
+            if (progress.status === 'paused') {
+                await resumeJob(jobId);
+                setProgress((prev) => (prev ? { ...prev, status: 'running', error: null } : prev));
+            } else {
+                await pauseJob(jobId);
+                setProgress((prev) => (prev ? { ...prev, status: 'paused', error: null } : prev));
+            }
+        } catch (err) {
+            setError(err.message || 'Failed to update scraper job state');
+        }
+    };
+
+    const handleCancel = async () => {
+        if (!jobId || !progress) {
+            return;
+        }
+
+        try {
+            await cancelJob(jobId);
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+            }
+            setProgress((prev) => (prev ? { ...prev, status: 'cancelled', error: 'Cancelled by user' } : prev));
+            setIsLoading(false);
+        } catch (err) {
+            setError(err.message || 'Failed to cancel scraper job');
+        }
+    };
 
     const handleScrape = async (e) => {
         e.preventDefault();
@@ -194,6 +229,8 @@ function Scraper() {
                             <div className="w-24 h-24 rounded-full bg-white/40 dark:bg-black/20 border border-stone-300/40 dark:border-white/5 flex items-center justify-center mb-6 shadow-sm">
                                 {progress.status === 'completed' ? (
                                     <CheckCircle size={40} className="text-emerald-600 dark:text-emerald-400" />
+                                ) : progress.status === 'paused' ? (
+                                    <Pause size={40} className="text-amber-600 dark:text-amber-400" />
                                 ) : progress.status === 'failed' ? (
                                     <XCircle size={40} className="text-red-600 dark:text-red-400" />
                                 ) : (
@@ -203,6 +240,8 @@ function Scraper() {
 
                             <h2 className="text-2xl font-bold text-stone-800 dark:text-white mb-2">
                                 {progress.status === 'completed' ? 'Scraping Complete' :
+                                    progress.status === 'paused' ? 'Scraping Paused' :
+                                        progress.status === 'cancelled' ? 'Scraping Cancelled' :
                                     progress.status === 'failed' ? 'Scraping Failed' :
                                         progress.status === 'running' ? 'Extracting Chapters...' :
                                             progress.status === 'detecting' ? 'Analyzing Table of Contents...' :
@@ -230,6 +269,10 @@ function Scraper() {
                                     <p className="text-sm font-medium text-stone-500 dark:text-violet-300/60 mt-3">
                                         {progress.status === 'completed' 
                                             ? `Successfully secured ${progress.total_chapters} chapters in library.` 
+                                            : progress.status === 'paused'
+                                                ? `Paused at chapter ${progress.current_chapter} of ${progress.total_chapters}`
+                                                : progress.status === 'cancelled'
+                                                    ? `Cancelled at chapter ${progress.current_chapter} of ${progress.total_chapters}`
                                             : `Fetching ${progress.current_chapter} of ${progress.total_chapters} chapters`}
                                     </p>
                                 </div>
@@ -239,6 +282,27 @@ function Scraper() {
                                 <div className="w-full mb-8 p-4 rounded-xl glass-thin border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400 text-sm font-medium flex items-center gap-3 text-left">
                                     <XCircle size={18} className="flex-shrink-0" />
                                     <span>{progress.error}</span>
+                                </div>
+                            )}
+
+                            {['detecting', 'pending', 'running', 'paused'].includes(progress.status) && (
+                                <div className="flex flex-col sm:flex-row gap-3 w-full justify-center mt-2">
+                                    <button
+                                        type="button"
+                                        className="py-3 px-6 rounded-full text-white font-bold text-sm bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-400 hover:to-indigo-400 dark:from-violet-600 dark:to-violet-600 dark:hover:from-violet-500 dark:hover:to-violet-500 shadow-sm transition-all flex items-center justify-center gap-2"
+                                        onClick={handlePauseResume}
+                                    >
+                                        {progress.status === 'paused' ? <Play size={16} /> : <Pause size={16} />}
+                                        {progress.status === 'paused' ? 'Resume' : 'Pause'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="py-3 px-6 rounded-full text-stone-700 dark:text-violet-100 font-bold text-sm bg-white/50 dark:bg-white/5 hover:bg-white/80 dark:hover:bg-violet-500/20 border border-stone-300/50 dark:border-white/10 transition-all flex items-center justify-center gap-2 backdrop-blur-sm"
+                                        onClick={handleCancel}
+                                    >
+                                        <StopCircle size={16} />
+                                        Cancel
+                                    </button>
                                 </div>
                             )}
 

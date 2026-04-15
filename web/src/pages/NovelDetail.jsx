@@ -98,14 +98,16 @@ function NovelDetail() {
     const fetchVoiceProfile = async () => {
         try {
             setVoiceProfileLoading(true);
+            const selectedProvider = getSettings().ttsProvider || 'kokoro';
             const [health, profile] = await Promise.all([
-                getAudioHealth(),
-                getNovelVoiceProfile(slug)
+                getAudioHealth(selectedProvider),
+                getNovelVoiceProfile(slug, selectedProvider)
             ]);
             setAudioHealth(health);
             setVoiceProfile(profile);
             setVoiceRefText(profile?.ref_text || '');
             setVoiceDisplayName(profile?.display_name || '');
+            setVoiceMessage(null);
         } catch (err) {
             setAudioHealth(null);
             setVoiceProfile(null);
@@ -156,10 +158,12 @@ function NovelDetail() {
         setVoiceSaving(true);
         setVoiceMessage(null);
         try {
+            const selectedProvider = getSettings().ttsProvider || 'kokoro';
             const profile = await uploadNovelVoiceProfile(slug, {
                 file: voiceFile,
                 refText: voiceRefText,
                 displayName: voiceDisplayName || voiceFile.name,
+                provider: selectedProvider,
             });
             setVoiceProfile(profile);
             setVoiceFile(null);
@@ -175,7 +179,8 @@ function NovelDetail() {
         setVoiceSaving(true);
         setVoiceMessage(null);
         try {
-            await deleteNovelVoiceProfile(slug);
+            const selectedProvider = getSettings().ttsProvider || 'kokoro';
+            await deleteNovelVoiceProfile(slug, selectedProvider);
             setVoiceProfile(null);
             setVoiceRefText('');
             setVoiceDisplayName('');
@@ -229,7 +234,10 @@ function NovelDetail() {
         setAudioBatchMessage(null);
 
         try {
-            if (qwenMode && !voiceProfile?.exists) {
+            const settings = getSettings();
+            const selectedProvider = settings.ttsProvider || 'kokoro';
+
+            if (selectedProvider === 'qwen3' && !voiceProfile?.exists) {
                 throw new Error('Save a novel voice profile first before queueing Qwen audio.');
             }
 
@@ -238,12 +246,16 @@ function NovelDetail() {
                 throw new Error('No chapters match the current audio generation selection.');
             }
 
-            const settings = getSettings();
-            const selectedVoice = qwenMode ? (voiceProfile?.voice_name || 'novel-default') : (settings.voice || 'af_heart');
+            const selectedVoice = selectedProvider === 'qwen3'
+                ? (voiceProfile?.voice_name || 'novel-default')
+                : selectedProvider === 'elevenlabs'
+                    ? (settings.elevenlabsVoice || '')
+                    : (settings.voice || 'af_heart');
 
             let queuedCount = 0;
             let existingCount = 0;
             let activeCount = 0;
+            let pausedCount = 0;
             let failedCount = 0;
 
             for (let index = 0; index < targetChapters.length; index += 1) {
@@ -254,13 +266,15 @@ function NovelDetail() {
                 });
 
                 try {
-                    const result = await generateChapterAudio(slug, chapter.chapter_number, selectedVoice);
+                    const result = await generateChapterAudio(slug, chapter.chapter_number, selectedVoice, selectedProvider);
                     if (result.status === 'queued') {
                         queuedCount += 1;
                     } else if (result.status === 'exists') {
                         existingCount += 1;
                     } else if (result.status === 'already_generating') {
                         activeCount += 1;
+                    } else if (result.status === 'paused') {
+                        pausedCount += 1;
                     } else {
                         failedCount += 1;
                     }
@@ -273,6 +287,7 @@ function NovelDetail() {
             const summaryParts = [];
             if (queuedCount > 0) summaryParts.push(`${queuedCount} queued`);
             if (activeCount > 0) summaryParts.push(`${activeCount} already generating`);
+            if (pausedCount > 0) summaryParts.push(`${pausedCount} paused`);
             if (existingCount > 0) summaryParts.push(`${existingCount} already finished`);
             if (failedCount > 0) summaryParts.push(`${failedCount} failed`);
 
@@ -354,18 +369,38 @@ function NovelDetail() {
     if (!novel) return null;
 
     const firstChapter = chapters.length > 0 ? Math.min(...chapters.map(c => c.chapter_number)) : 0;
-    const qwenMode = audioHealth?.provider === 'qwen3';
+    const currentSettings = getSettings();
+    const selectedProvider = currentSettings.ttsProvider || 'kokoro';
+    const qwenMode = selectedProvider === 'qwen3';
+    const elevenlabsMode = selectedProvider === 'elevenlabs';
+    const queuePanelClassName = qwenMode
+        ? 'border-violet-500/20 border-l-4 border-l-violet-500'
+        : elevenlabsMode
+            ? 'border-amber-500/20 border-l-4 border-l-amber-500'
+            : 'border-emerald-500/20 border-l-4 border-l-emerald-500';
+    const modeChipClassName = qwenMode
+        ? 'bg-violet-500/20 text-violet-800 dark:text-violet-300 shadow-sm'
+        : elevenlabsMode
+            ? 'bg-amber-500/20 text-amber-800 dark:text-amber-300 shadow-sm'
+            : 'bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 shadow-sm';
+    const dispatchButtonClassName = qwenMode
+        ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500'
+        : elevenlabsMode
+            ? 'bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500'
+            : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500';
     const audioSummary = chapters.reduce((summary, chapter) => {
         if (!chapter.has_audio) {
             return summary;
         }
         if (chapter.audio_provider === 'qwen3') {
-            summary.qwen += 1;
+            summary.qwen3 += 1;
+        } else if (chapter.audio_provider === 'elevenlabs') {
+            summary.elevenlabs += 1;
         } else {
             summary.kokoro += 1;
         }
         return summary;
-    }, { kokoro: 0, qwen: 0 });
+    }, { kokoro: 0, qwen3: 0, elevenlabs: 0 });
 
     return (
         <div className="min-h-screen p-4 md:p-8 pt-20 md:pt-8 flex flex-col gap-6 md:gap-8 max-w-[1600px] mx-auto relative z-10 w-full">
@@ -486,7 +521,7 @@ function NovelDetail() {
                     </div>
                 </header>
 
-                {/* --- 2. Dynamic Session Interface (Qwen vs Kokoro) --- */}
+                {/* --- 2. Dynamic Session Interface (Provider Aware) --- */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-12">
                     
                     {/* Voice Profile Card (Qwen Only) */}
@@ -594,7 +629,7 @@ function NovelDetail() {
                     )}
 
                     {/* Audio Generation Terminal */}
-                    <div className={`glass rounded-3xl p-6 border ${qwenMode ? 'border-violet-500/20 border-l-4 border-l-violet-500' : 'border-emerald-500/20 border-l-4 border-l-emerald-500'} shadow-lg ${!qwenMode ? 'lg:col-span-2 max-w-3xl mx-auto w-full' : ''}`}>
+                    <div className={`glass rounded-3xl p-6 border ${queuePanelClassName} shadow-lg ${!qwenMode ? 'lg:col-span-2 max-w-3xl mx-auto w-full' : ''}`}>
                         
                         <div className="flex justify-between items-start mb-6">
                             <div>
@@ -602,7 +637,9 @@ function NovelDetail() {
                                 <p className="text-sm text-stone-500 dark:text-stone-400 max-w-sm">
                                     {qwenMode 
                                         ? 'Select chapters to synthesize using the established novel voice profile above.' 
-                                        : 'Select chapters to synthesize using your default Kokoro reader settings.'}
+                                        : elevenlabsMode
+                                            ? 'Select chapters to synthesize using your selected ElevenLabs voice.'
+                                            : 'Select chapters to synthesize using your default Kokoro reader settings.'}
                                 </p>
                             </div>
 
@@ -614,7 +651,11 @@ function NovelDetail() {
                                 </div>
                                 <div className="px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/20 flex items-center gap-2">
                                     <div className="w-2 h-2 rounded-full bg-amber-500"></div>
-                                    <span className="text-xs font-bold text-amber-700 dark:text-amber-400 uppercase tracking-widest">{audioSummary.qwen}</span>
+                                    <span className="text-xs font-bold text-amber-700 dark:text-amber-400 uppercase tracking-widest">{audioSummary.qwen3}</span>
+                                </div>
+                                <div className="px-3 py-1.5 rounded-full bg-orange-500/10 border border-orange-500/20 flex items-center gap-2">
+                                    <div className="w-2 h-2 rounded-full bg-orange-500"></div>
+                                    <span className="text-xs font-bold text-orange-700 dark:text-orange-400 uppercase tracking-widest">{audioSummary.elevenlabs}</span>
                                 </div>
                             </div>
                         </div>
@@ -625,7 +666,7 @@ function NovelDetail() {
                                 <button
                                     key={mode}
                                     type="button"
-                                    className={`px-4 py-2 rounded-lg text-sm font-bold capitalize transition-all ${audioGenerationMode === mode ? (qwenMode ? 'bg-violet-500/20 text-violet-800 dark:text-violet-300 shadow-sm' : 'bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 shadow-sm') : 'text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200'}`}
+                                    className={`px-4 py-2 rounded-lg text-sm font-bold capitalize transition-all ${audioGenerationMode === mode ? modeChipClassName : 'text-stone-500 dark:text-stone-400 hover:text-stone-700 dark:hover:text-stone-200'}`}
                                     onClick={() => setAudioGenerationMode(mode)}
                                 >
                                     {mode}
@@ -670,7 +711,7 @@ function NovelDetail() {
                         {/* Submit Actions */}
                         <div className="flex items-center gap-4">
                             <button
-                                className={`px-6 py-3 rounded-xl text-white font-bold text-sm shadow-md transition-all flex items-center gap-2 transform hover:-translate-y-0.5 ${qwenMode ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-500 hover:to-fuchsia-500' : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500'}`}
+                                className={`px-6 py-3 rounded-xl text-white font-bold text-sm shadow-md transition-all flex items-center gap-2 transform hover:-translate-y-0.5 ${dispatchButtonClassName}`}
                                 onClick={handleBulkAudioGeneration}
                                 disabled={audioBatchSubmitting || (qwenMode && !voiceProfile?.exists)}
                             >
@@ -679,7 +720,9 @@ function NovelDetail() {
                             <span className="text-xs font-bold text-stone-500 dark:text-stone-400 uppercase tracking-wider">
                                 {qwenMode
                                     ? (voiceProfile?.exists ? 'Voice Ready' : 'Awaiting Voice Profile')
-                                    : `Using Setting: ${getSettings().voice || 'af_heart'}`}
+                                    : elevenlabsMode
+                                        ? `Using Voice: ${currentSettings.elevenlabsVoice || 'Auto-select'}`
+                                        : `Using Setting: ${currentSettings.voice || 'af_heart'}`}
                             </span>
                         </div>
 
@@ -726,17 +769,26 @@ function NovelDetail() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
                         {chapters.map(chapter => {
                             let baseClasses = "glass-thin flex flex-col items-center justify-center py-4 px-2 rounded-2xl border transition-all text-center group cursor-pointer hover:shadow-lg hover:-translate-y-1 overflow-hidden relative min-h-[100px] ";
+                            const isGenerating = chapter.audio_status === 'generating' || chapter.audio_status === 'pending';
+                            const isPaused = chapter.audio_status === 'paused';
+                            const isCancelled = chapter.audio_status === 'cancelled';
                             
                             if (selectedChapters.includes(chapter.chapter_number)) {
                                 baseClasses += "border-violet-500/50 bg-violet-500/10 ring-2 ring-violet-500/20 ";
                             } else if (chapter.has_audio) {
                                 if (chapter.audio_provider === 'qwen3') {
                                     baseClasses += "border-amber-400/40 dark:border-amber-500/30 bg-gradient-to-br from-amber-500/5 to-transparent ";
+                                } else if (chapter.audio_provider === 'elevenlabs') {
+                                    baseClasses += "border-orange-400/40 dark:border-orange-500/30 bg-gradient-to-br from-orange-500/5 to-transparent ";
                                 } else {
                                     baseClasses += "border-slate-300/50 dark:border-slate-500/30 bg-gradient-to-br from-slate-400/5 to-transparent ";
                                 }
-                            } else if (chapter.audio_status === 'generating' || chapter.audio_status === 'pending') {
+                            } else if (isGenerating) {
                                 baseClasses += "border-dashed border-blue-400/50 dark:border-blue-500/40 bg-blue-500/5 ";
+                            } else if (isPaused) {
+                                baseClasses += "border-dashed border-amber-400/50 dark:border-amber-500/40 bg-amber-500/5 ";
+                            } else if (isCancelled) {
+                                baseClasses += "border-dashed border-rose-400/50 dark:border-rose-500/40 bg-rose-500/5 ";
                             } else {
                                 baseClasses += "border-stone-200/50 dark:border-white/5 hover:border-violet-400/30 dark:hover:border-violet-500/30 bg-white/20 dark:bg-black/20 ";
                             }
@@ -751,16 +803,26 @@ function NovelDetail() {
                                     <span className="text-xl font-display font-bold text-stone-800 dark:text-white mb-1 group-hover:scale-110 transition-transform">{chapter.chapter_number}</span>
                                     
                                     {chapter.has_audio && (
-                                        <span className={`text-[9px] uppercase font-black tracking-widest ${chapter.audio_provider === 'qwen3' ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
-                                            {chapter.audio_provider === 'qwen3' ? 'Qwen TTS' : 'Kokoro TTS'}
+                                        <span className={`text-[9px] uppercase font-black tracking-widest ${chapter.audio_provider === 'qwen3' ? 'text-amber-600 dark:text-amber-400' : chapter.audio_provider === 'elevenlabs' ? 'text-orange-600 dark:text-orange-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                            {chapter.audio_provider === 'qwen3' ? 'Qwen TTS' : chapter.audio_provider === 'elevenlabs' ? 'ElevenLabs TTS' : 'Kokoro TTS'}
                                         </span>
                                     )}
-                                    {!chapter.has_audio && (chapter.audio_status === 'generating' || chapter.audio_status === 'pending') && (
+                                    {!chapter.has_audio && isGenerating && (
                                         <span className="text-[9px] uppercase font-black tracking-widest text-blue-500 dark:text-blue-400 flex items-center gap-1">
                                             <Loader size={8} className="spin" /> Generating
                                         </span>
                                     )}
-                                    {!chapter.has_audio && chapter.audio_status !== 'generating' && chapter.audio_status !== 'pending' && (
+                                    {!chapter.has_audio && isPaused && (
+                                        <span className="text-[9px] uppercase font-black tracking-widest text-amber-600 dark:text-amber-400">
+                                            Paused
+                                        </span>
+                                    )}
+                                    {!chapter.has_audio && isCancelled && (
+                                        <span className="text-[9px] uppercase font-black tracking-widest text-rose-600 dark:text-rose-400">
+                                            Cancelled
+                                        </span>
+                                    )}
+                                    {!chapter.has_audio && !isGenerating && !isPaused && !isCancelled && (
                                         <span className="text-[9px] uppercase font-black tracking-widest text-stone-400 dark:text-stone-500">
                                             Text Only
                                         </span>
@@ -775,16 +837,26 @@ function NovelDetail() {
                                     <span className="text-xl font-display font-bold text-stone-800 dark:text-white mb-1 group-hover:scale-110 transition-transform">{chapter.chapter_number}</span>
                                     
                                     {chapter.has_audio && (
-                                        <span className={`text-[9px] uppercase font-black tracking-widest ${chapter.audio_provider === 'qwen3' ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
-                                            {chapter.audio_provider === 'qwen3' ? 'Qwen TTS' : 'Kokoro TTS'}
+                                        <span className={`text-[9px] uppercase font-black tracking-widest ${chapter.audio_provider === 'qwen3' ? 'text-amber-600 dark:text-amber-400' : chapter.audio_provider === 'elevenlabs' ? 'text-orange-600 dark:text-orange-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                                            {chapter.audio_provider === 'qwen3' ? 'Qwen TTS' : chapter.audio_provider === 'elevenlabs' ? 'ElevenLabs TTS' : 'Kokoro TTS'}
                                         </span>
                                     )}
-                                    {!chapter.has_audio && (chapter.audio_status === 'generating' || chapter.audio_status === 'pending') && (
+                                    {!chapter.has_audio && isGenerating && (
                                         <span className="text-[9px] uppercase font-black tracking-widest text-blue-500 dark:text-blue-400 flex items-center gap-1">
                                             <Loader size={8} className="spin" /> Generating
                                         </span>
                                     )}
-                                    {!chapter.has_audio && chapter.audio_status !== 'generating' && chapter.audio_status !== 'pending' && (
+                                    {!chapter.has_audio && isPaused && (
+                                        <span className="text-[9px] uppercase font-black tracking-widest text-amber-600 dark:text-amber-400">
+                                            Paused
+                                        </span>
+                                    )}
+                                    {!chapter.has_audio && isCancelled && (
+                                        <span className="text-[9px] uppercase font-black tracking-widest text-rose-600 dark:text-rose-400">
+                                            Cancelled
+                                        </span>
+                                    )}
+                                    {!chapter.has_audio && !isGenerating && !isPaused && !isCancelled && (
                                         <span className="text-[9px] uppercase font-black tracking-widest text-stone-400 dark:text-stone-500">
                                             Text Only
                                         </span>

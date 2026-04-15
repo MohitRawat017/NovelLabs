@@ -6,10 +6,12 @@ import asyncio
 import logging
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
@@ -28,12 +30,15 @@ SCRAPER_DISABLED_DETAIL = {
     "message": "Scraper is disabled in this build. Set SCRAPER_ENABLED=true to enable it.",
 }
 
+SCRAPER_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+SCRAPER_RUNNING_STATUSES = {"pending", "running", "detecting"}
+
 # Import scraper module
 try:
-    import sys
-    sys.path.insert(0, str(BASE_DIR / "src"))
-    from scraper import NovelScraper, SCRAPER_AVAILABLE
-except ImportError:
+    from ..adapters.scraper_adapter import NovelScraper
+    SCRAPER_AVAILABLE = True
+except Exception as exc:
+    logger.warning("New scraper adapter unavailable: %s", exc)
     SCRAPER_AVAILABLE = False
     NovelScraper = None
 
@@ -48,12 +53,23 @@ def check_scraper_available():
     if not SCRAPER_AVAILABLE:
         raise HTTPException(
             status_code=503,
-            detail="Scraping service unavailable. Install selenium, beautifulsoup4, and undetected-chromedriver.",
+            detail=(
+                "Scraping service unavailable. Install the new scraper dependencies "
+                "(see src/SCRAPER/requirements.txt)."
+            ),
         )
 
 
 def _safe_folder_name(name: str) -> str:
     return re.sub(r'[\\/*?<>:"|]', "", name).strip()
+
+
+def _validate_scrape_url(url: str) -> str:
+    """Only allow http/https URLs to be scraped."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs can be scraped")
+    return url
 
 
 def _normalize_genres(genres) -> str:
@@ -75,13 +91,21 @@ def _is_retryable_scrape_error(exc: Exception) -> bool:
     return any(marker in message for marker in retry_markers)
 
 
-def _persist_scraped_output(detail: dict, toc_url: str, folder_name: str, output_dir: Path) -> bool:
+def _persist_scraped_output(
+    detail: dict,
+    toc_url: str,
+    folder_name: str,
+    output_dir: Path,
+    discovered_total_chapters: int | None = None,
+) -> bool:
     from .chapters import sync_chapters_for_novel
     from .novels import slugify, upsert_novel_record
 
-    chapter_count = len(list(output_dir.glob("Chapter_*.txt")))
-    if chapter_count == 0:
+    local_chapter_count = len(list(output_dir.glob("Chapter_*.txt")))
+    if local_chapter_count == 0:
         return False
+
+    chapter_count = discovered_total_chapters or local_chapter_count
 
     novel_record = upsert_novel_record(
         slug=slugify(folder_name),
@@ -97,7 +121,7 @@ def _persist_scraped_output(detail: dict, toc_url: str, folder_name: str, output
     return True
 
 
-def _run_scraper_job(job_id: str, toc_url: str, start: int, end: int | None):
+def _run_scraper_job(job_id: str, toc_url: str, start: int, end: int | None, discovered_total_chapters: int | None = None):
     scraper = NovelScraper(headless=True)
     job = scrape_jobs[job_id]
     detail = None
@@ -106,6 +130,7 @@ def _run_scraper_job(job_id: str, toc_url: str, start: int, end: int | None):
 
     try:
         job["status"] = "running"
+        job["updated_at"] = datetime.utcnow().isoformat()
 
         if end is None or end < start:
             raise ValueError("Invalid chapter range requested")
@@ -134,8 +159,13 @@ def _run_scraper_job(job_id: str, toc_url: str, start: int, end: int | None):
 
         completed_count = 0
         for chapter_number, chapter_url in enumerate(chapter_urls, start=start):
+            while job.get("status") == "paused":
+                job["updated_at"] = datetime.utcnow().isoformat()
+                time.sleep(0.4)
+
             if job.get("status") == "cancelled":
                 job["error"] = "Cancelled by user"
+                job["updated_at"] = datetime.utcnow().isoformat()
                 return
 
             target_path = output_dir / f"Chapter_{chapter_number:04d}.txt"
@@ -167,19 +197,34 @@ def _run_scraper_job(job_id: str, toc_url: str, start: int, end: int | None):
 
             completed_count += 1
             job["current_chapter"] = completed_count
+            job["updated_at"] = datetime.utcnow().isoformat()
 
-        job["persisted"] = _persist_scraped_output(detail, toc_url, folder_name, output_dir)
+        job["persisted"] = _persist_scraped_output(
+            detail,
+            toc_url,
+            folder_name,
+            output_dir,
+            discovered_total_chapters=discovered_total_chapters,
+        )
         job["status"] = "completed"
         job["completed_at"] = datetime.utcnow().isoformat()
+        job["updated_at"] = job["completed_at"]
     except Exception as exc:
         if detail is not None and output_dir is not None and folder_name is not None:
             try:
-                job["persisted"] = _persist_scraped_output(detail, toc_url, folder_name, output_dir)
+                job["persisted"] = _persist_scraped_output(
+                    detail,
+                    toc_url,
+                    folder_name,
+                    output_dir,
+                    discovered_total_chapters=discovered_total_chapters,
+                )
             except Exception as persist_exc:
                 logger.exception("Failed to persist partial scraper output for %s: %s", toc_url, persist_exc)
 
         job["status"] = "failed"
         job["error"] = str(exc)
+    job["updated_at"] = datetime.utcnow().isoformat()
 
 
 run_scraper_job = _run_scraper_job
@@ -188,6 +233,7 @@ run_scraper_job = _run_scraper_job
 @router.post("/start")
 async def start_scraping(request: ScrapeRequest, background_tasks: BackgroundTasks):
     check_scraper_available()
+    _validate_scrape_url(request.toc_url)
 
     try:
         scraper = NovelScraper(headless=True)
@@ -221,12 +267,13 @@ async def start_scraping(request: ScrapeRequest, background_tasks: BackgroundTas
         "novel_title": None,
         "persisted": False,
         "error": None,
+        "updated_at": datetime.utcnow().isoformat(),
     }
 
     try:
         thread = threading.Thread(
             target=run_scraper_job,
-            args=(job_id, request.toc_url, request.start_chapter, end_chapter),
+            args=(job_id, request.toc_url, request.start_chapter, end_chapter, total_chapters),
             daemon=True,
         )
         thread.start()
@@ -246,7 +293,19 @@ async def start_scraping(request: ScrapeRequest, background_tasks: BackgroundTas
 async def get_scrape_status(job_id: str):
     ensure_scraper_enabled()
     if job_id not in scrape_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+        # Jobs are in-memory only and are lost on process restarts/reloads.
+        # Return a terminal state so clients can stop polling gracefully.
+        return ScrapeStatusResponse(
+            status="failed",
+            current_chapter=0,
+            total_chapters=0,
+            novel_title=None,
+            persisted=False,
+            error=(
+                "Job not found. It may have expired after a server reload/restart. "
+                "Please start scraping again."
+            ),
+        )
 
     job = scrape_jobs[job_id]
     return ScrapeStatusResponse(
@@ -277,7 +336,51 @@ async def cancel_job(job_id: str):
 
     job["status"] = "cancelled"
     job["persisted"] = False
+    job["updated_at"] = datetime.utcnow().isoformat()
     return {"message": "Job cancelled", "status": "cancelled"}
+
+
+@router.post("/pause/{job_id}")
+async def pause_job(job_id: str):
+    ensure_scraper_enabled()
+    if job_id not in scrape_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = scrape_jobs[job_id]
+    current_status = job.get("status")
+
+    if current_status in SCRAPER_TERMINAL_STATUSES:
+        return {"message": f"Job already {current_status}", "status": current_status}
+
+    if current_status == "paused":
+        return {"message": "Job already paused", "status": "paused"}
+
+    if current_status not in SCRAPER_RUNNING_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Cannot pause job in '{current_status}' state")
+
+    job["status"] = "paused"
+    job["updated_at"] = datetime.utcnow().isoformat()
+    return {"message": "Job paused", "status": "paused"}
+
+
+@router.post("/resume/{job_id}")
+async def resume_job(job_id: str):
+    ensure_scraper_enabled()
+    if job_id not in scrape_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = scrape_jobs[job_id]
+    current_status = job.get("status")
+
+    if current_status in SCRAPER_TERMINAL_STATUSES:
+        return {"message": f"Job already {current_status}", "status": current_status}
+
+    if current_status != "paused":
+        return {"message": f"Job is {current_status}, nothing to resume", "status": current_status}
+
+    job["status"] = "running"
+    job["updated_at"] = datetime.utcnow().isoformat()
+    return {"message": "Job resumed", "status": "running"}
 
 
 @router.delete("/job/{job_id}")

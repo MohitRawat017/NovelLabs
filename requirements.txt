@@ -12,6 +12,11 @@ python-multipart>=0.0.9
 # Database and config
 python-dotenv>=1.0.0
 sqlalchemy>=2.0.0
+pydantic-settings>=2.0.0
+
+# Scraper runtime (adapter path)
+curl_cffi>=0.7.3
+selectolax>=0.3.21
 
 # Local TTS - Kokoro (default)
 numpy>=2.0.0

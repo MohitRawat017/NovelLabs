@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ExternalLink, Headphones, Library, Palette, Type, UserRound, Volume2, X } from 'lucide-react';
-import { FONTS, VOICES } from '../../utils/readerSettings';
+import { getVoicesFlat } from '../../services/api';
+import { FONTS, TTS_PROVIDER_OPTIONS, VOICES } from '../../utils/readerSettings';
 import { getAvatarUrl } from '../../utils/homeProfile';
 
 function HomeProfilePanel({
@@ -14,15 +16,57 @@ function HomeProfilePanel({
     onProfileChange,
     onSettingChange,
 }) {
+    const selectedProvider = settings.ttsProvider || 'kokoro';
+    const [providerVoices, setProviderVoices] = useState([]);
+    const [providerVoicesError, setProviderVoicesError] = useState(null);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadProviderVoices = async () => {
+            if (!isOpen || selectedProvider !== 'elevenlabs') {
+                setProviderVoices([]);
+                setProviderVoicesError(null);
+                return;
+            }
+
+            try {
+                const voices = await getVoicesFlat('elevenlabs');
+                if (cancelled) {
+                    return;
+                }
+                setProviderVoices(Array.isArray(voices) ? voices : []);
+                setProviderVoicesError(null);
+
+                if (!settings.elevenlabsVoice && Array.isArray(voices) && voices.length > 0) {
+                    onSettingChange('elevenlabsVoice', voices[0].id);
+                }
+            } catch (error) {
+                if (cancelled) {
+                    return;
+                }
+                setProviderVoices([]);
+                setProviderVoicesError(error.message || 'Failed to load ElevenLabs voices.');
+            }
+        };
+
+        loadProviderVoices();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, onSettingChange, selectedProvider, settings.elevenlabsVoice]);
+
     if (!isOpen) {
         return null;
     }
 
-    const providerLabel = audioHealth?.provider === 'qwen3'
+    const providerLabel = selectedProvider === 'qwen3'
         ? 'Qwen3 local'
-        : audioHealth?.provider === 'kokoro'
-            ? 'Kokoro'
-            : 'Provider unavailable';
+        : selectedProvider === 'elevenlabs'
+            ? 'ElevenLabs cloud'
+            : selectedProvider === 'kokoro'
+                ? 'Kokoro'
+                : 'Provider unavailable';
 
     return (
         <AnimatePresence>
@@ -104,12 +148,37 @@ function HomeProfilePanel({
                                     </label>
 
                                     <label className="flex flex-col gap-2">
-                                        <span className="text-sm font-semibold text-stone-700 dark:text-violet-100">TTS voice</span>
-                                        <select className="input bg-white/50 dark:bg-violet-950/35 border-stone-300/50 dark:border-violet-500/20 text-stone-900 dark:text-white" value={settings.voice} onChange={(event) => onSettingChange('voice', event.target.value)}>
-                                            {Object.entries(VOICES).map(([group, voices]) => (
-                                                <optgroup key={group} label={group}>{voices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</optgroup>
+                                        <span className="text-sm font-semibold text-stone-700 dark:text-violet-100">TTS provider</span>
+                                        <select className="input bg-white/50 dark:bg-violet-950/35 border-stone-300/50 dark:border-violet-500/20 text-stone-900 dark:text-white" value={selectedProvider} onChange={(event) => onSettingChange('ttsProvider', event.target.value)}>
+                                            {TTS_PROVIDER_OPTIONS.map((provider) => (
+                                                <option key={provider.value} value={provider.value}>{provider.label}</option>
                                             ))}
                                         </select>
+                                    </label>
+
+                                    <label className="flex flex-col gap-2">
+                                        <span className="text-sm font-semibold text-stone-700 dark:text-violet-100">TTS voice</span>
+                                        {selectedProvider === 'qwen3' ? (
+                                            <div className="rounded-2xl bg-white/25 dark:bg-white/5 border border-white/55 dark:border-white/8 px-4 py-3 text-sm text-stone-600 dark:text-violet-200/65">
+                                                Qwen3 uses the saved novel-specific voice profile from each novel page.
+                                            </div>
+                                        ) : selectedProvider === 'elevenlabs' ? (
+                                            <>
+                                                <select className="input bg-white/50 dark:bg-violet-950/35 border-stone-300/50 dark:border-violet-500/20 text-stone-900 dark:text-white" value={settings.elevenlabsVoice || ''} onChange={(event) => onSettingChange('elevenlabsVoice', event.target.value)} disabled={providerVoices.length === 0}>
+                                                    {providerVoices.length === 0 && <option value="">{providerVoicesError ? 'Voice list unavailable' : 'Loading ElevenLabs voices...'}</option>}
+                                                    {providerVoices.map((voice) => (
+                                                        <option key={voice.id} value={voice.id}>{voice.label || voice.name || voice.id}</option>
+                                                    ))}
+                                                </select>
+                                                {providerVoicesError && <span className="text-xs text-rose-500">{providerVoicesError}</span>}
+                                            </>
+                                        ) : (
+                                            <select className="input bg-white/50 dark:bg-violet-950/35 border-stone-300/50 dark:border-violet-500/20 text-stone-900 dark:text-white" value={settings.voice} onChange={(event) => onSettingChange('voice', event.target.value)}>
+                                                {Object.entries(VOICES).map(([group, voices]) => (
+                                                    <optgroup key={group} label={group}>{voices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}</optgroup>
+                                                ))}
+                                            </select>
+                                        )}
                                     </label>
 
                                     <div>
@@ -156,11 +225,13 @@ function HomeProfilePanel({
                                     </div>
                                     <div className="rounded-2xl bg-white/25 dark:bg-white/5 border border-white/55 dark:border-white/8 px-4 py-3">
                                         <p className="text-stone-500 dark:text-violet-300/60 uppercase tracking-[0.16em] text-[10px] font-semibold mb-1">Defaults</p>
-                                        <p className="font-semibold text-stone-800 dark:text-white">Voice: {settings.voice}</p>
+                                        <p className="font-semibold text-stone-800 dark:text-white">
+                                            Voice: {selectedProvider === 'elevenlabs' ? (settings.elevenlabsVoice || 'Choose a voice') : selectedProvider === 'qwen3' ? 'Novel-specific profile' : settings.voice}
+                                        </p>
                                         <p className="text-stone-600 dark:text-violet-200/65">Playback speed: {settings.ttsSpeed}x</p>
                                     </div>
                                     <div className="rounded-2xl bg-white/25 dark:bg-white/5 border border-white/55 dark:border-white/8 px-4 py-3">
-                                        {audioHealth?.provider === 'qwen3' ? (
+                                        {selectedProvider === 'qwen3' ? (
                                             <>
                                                 <p className="font-semibold text-stone-800 dark:text-white mb-1">Qwen voices stay novel-specific.</p>
                                                 <p className="text-stone-600 dark:text-violet-200/65 mb-3">Save cloned voice references from each novel page before queueing chapter audio.</p>
@@ -168,6 +239,11 @@ function HomeProfilePanel({
                                                     <Library size={15} />
                                                     Open Library
                                                 </Link>
+                                            </>
+                                        ) : selectedProvider === 'elevenlabs' ? (
+                                            <>
+                                                <p className="font-semibold text-stone-800 dark:text-white mb-1">ElevenLabs uses your shared voice selection.</p>
+                                                <p className="text-stone-600 dark:text-violet-200/65">Pick one of your ElevenLabs voices here, then queue chapter audio from the novel page.</p>
                                             </>
                                         ) : (
                                             <>

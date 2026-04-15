@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { X, Volume2, Type, Palette } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
-import { FONTS, VOICES, getSettings, saveReaderSettings } from '../../utils/readerSettings';
+import { getVoicesFlat } from '../../services/api';
+import { FONTS, TTS_PROVIDER_OPTIONS, VOICES, getSettings, saveReaderSettings } from '../../utils/readerSettings';
 import './SettingsModal.css';
 
 export { getSettings } from '../../utils/readerSettings';
@@ -9,6 +10,7 @@ export { getSettings } from '../../utils/readerSettings';
 function SettingsModal({ isOpen, onClose, onSettingsChange }) {
     const { theme, setTheme } = useTheme();
     const [settings, setSettings] = useState(getSettings);
+    const [providerVoices, setProviderVoices] = useState([]);
 
     useEffect(() => {
         if (isOpen) {
@@ -19,6 +21,37 @@ function SettingsModal({ isOpen, onClose, onSettingsChange }) {
     useEffect(() => {
         setSettings((previous) => ({ ...previous, theme }));
     }, [theme]);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadVoices = async () => {
+            if (!isOpen || settings.ttsProvider !== 'elevenlabs') {
+                setProviderVoices([]);
+                return;
+            }
+
+            try {
+                const voices = await getVoicesFlat('elevenlabs');
+                if (cancelled) {
+                    return;
+                }
+                setProviderVoices(Array.isArray(voices) ? voices : []);
+                if (!settings.elevenlabsVoice && Array.isArray(voices) && voices.length > 0) {
+                    updateSetting('elevenlabsVoice', voices[0].id);
+                }
+            } catch {
+                if (!cancelled) {
+                    setProviderVoices([]);
+                }
+            }
+        };
+
+        loadVoices();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, settings.ttsProvider]);
 
     const updateSetting = (key, value) => {
         const newSettings = { ...settings, [key]: value };
@@ -106,23 +139,60 @@ function SettingsModal({ isOpen, onClose, onSettingsChange }) {
                     <section className="flex flex-col gap-3">
                         <div className="flex items-center gap-2 text-stone-600 dark:text-stone-300 font-medium">
                             <Volume2 size={18} className="text-violet-500" />
-                            <span>TTS Voice</span>
+                            <span>TTS Provider</span>
                         </div>
                         <select
-                            value={settings.voice}
-                            onChange={e => updateSetting('voice', e.target.value)}
+                            value={settings.ttsProvider || 'kokoro'}
+                            onChange={e => updateSetting('ttsProvider', e.target.value)}
                             className="w-full px-4 py-3 rounded-2xl glass-thin bg-white/70 dark:bg-black/40 border border-stone-200/50 dark:border-white/10 text-stone-800 dark:text-stone-200 outline-none focus:border-violet-500/50 appearance-none font-medium"
                         >
-                            {Object.entries(VOICES).map(([group, voices]) => (
-                                <optgroup key={group} label={group} className="font-bold text-stone-500 dark:text-stone-400">
-                                    {voices.map(voice => (
-                                        <option key={voice} value={voice} className="bg-white dark:bg-[#110e15] font-normal text-stone-800 dark:text-stone-200">
-                                            {voice}
-                                        </option>
-                                    ))}
-                                </optgroup>
+                            {TTS_PROVIDER_OPTIONS.map((provider) => (
+                                <option key={provider.value} value={provider.value} className="bg-white dark:bg-[#110e15] text-stone-800 dark:text-stone-200">
+                                    {provider.label}
+                                </option>
                             ))}
                         </select>
+                    </section>
+
+                    <section className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2 text-stone-600 dark:text-stone-300 font-medium">
+                            <Volume2 size={18} className="text-violet-500" />
+                            <span>TTS Voice</span>
+                        </div>
+                        {settings.ttsProvider === 'qwen3' ? (
+                            <div className="w-full px-4 py-3 rounded-2xl glass-thin bg-white/70 dark:bg-black/40 border border-stone-200/50 dark:border-white/10 text-sm text-stone-600 dark:text-stone-300">
+                                Qwen3 uses a saved voice profile per novel.
+                            </div>
+                        ) : settings.ttsProvider === 'elevenlabs' ? (
+                            <select
+                                value={settings.elevenlabsVoice || ''}
+                                onChange={e => updateSetting('elevenlabsVoice', e.target.value)}
+                                className="w-full px-4 py-3 rounded-2xl glass-thin bg-white/70 dark:bg-black/40 border border-stone-200/50 dark:border-white/10 text-stone-800 dark:text-stone-200 outline-none focus:border-violet-500/50 appearance-none font-medium"
+                            >
+                                {providerVoices.length === 0 && <option value="" className="bg-white dark:bg-[#110e15] text-stone-800 dark:text-stone-200">Loading ElevenLabs voices...</option>}
+                                {providerVoices.map((voice) => (
+                                    <option key={voice.id} value={voice.id} className="bg-white dark:bg-[#110e15] font-normal text-stone-800 dark:text-stone-200">
+                                        {voice.label || voice.name || voice.id}
+                                    </option>
+                                ))}
+                            </select>
+                        ) : (
+                            <select
+                                value={settings.voice}
+                                onChange={e => updateSetting('voice', e.target.value)}
+                                className="w-full px-4 py-3 rounded-2xl glass-thin bg-white/70 dark:bg-black/40 border border-stone-200/50 dark:border-white/10 text-stone-800 dark:text-stone-200 outline-none focus:border-violet-500/50 appearance-none font-medium"
+                            >
+                                {Object.entries(VOICES).map(([group, voices]) => (
+                                    <optgroup key={group} label={group} className="font-bold text-stone-500 dark:text-stone-400">
+                                        {voices.map(voice => (
+                                            <option key={voice} value={voice} className="bg-white dark:bg-[#110e15] font-normal text-stone-800 dark:text-stone-200">
+                                                {voice}
+                                            </option>
+                                        ))}
+                                    </optgroup>
+                                ))}
+                            </select>
+                        )}
                     </section>
 
                     <section className="flex flex-col gap-3">

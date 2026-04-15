@@ -19,11 +19,19 @@ export const VOICES = {
     ],
 };
 
+export const TTS_PROVIDER_OPTIONS = [
+    { value: 'kokoro', label: 'Kokoro' },
+    { value: 'qwen3', label: 'Qwen3' },
+    { value: 'elevenlabs', label: 'ElevenLabs' },
+];
+
 export const DEFAULT_SETTINGS = {
     fontSize: 18,
     fontFamily: 'Merriweather, Georgia, serif',
     theme: 'light',
+    ttsProvider: 'kokoro',
     voice: 'af_heart',
+    elevenlabsVoice: '',
     ttsSpeed: 1.0,
 };
 

@@ -61,6 +61,32 @@ async def startup_event():
         logger.info("Initializing database...")
         init_db()
         logger.info("Database initialized successfully")
+
+        # Reset any chapter_audio rows left stuck in 'generating' or 'paused' from a
+        # previous server crash or restart. Without this, the frontend sees them as
+        # forever-running or forever-paused with no background thread to service them.
+        try:
+            from .database import get_db
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE chapter_audio"
+                    " SET status = 'cancelled',"
+                    "     error  = NULL,"
+                    "     progress = 0,"
+                    "     updated_at = CURRENT_TIMESTAMP"
+                    " WHERE status IN ('generating', 'paused')"
+                    "    OR (status = 'failed' AND error = ?)"
+                    ,
+                    (audio.STALE_RESTART_AUDIO_ERROR,)
+                )
+                stale_count = cursor.rowcount
+            if stale_count:
+                logger.warning(
+                    "Reset %d stale audio job(s) to 'cancelled' on startup", stale_count
+                )
+        except Exception as reset_err:
+            logger.warning("Could not reset stale generating jobs on startup: %s", reset_err)
         
         # FIXED: Sync novels once on startup instead of on every request
         try:

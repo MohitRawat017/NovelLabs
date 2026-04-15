@@ -8,6 +8,7 @@ import base64
 import io
 import json
 import logging
+import threading
 from abc import ABC, abstractmethod
 from functools import lru_cache
 from pathlib import Path
@@ -18,11 +19,18 @@ import numpy as np
 import soundfile as sf
 
 from ..config import (
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_BASE_URL,
+    ELEVENLABS_MODEL_ID,
+    ELEVENLABS_OUTPUT_FORMAT,
+    ELEVENLABS_TIMEOUT,
+    ELEVENLABS_VOICE_ID,
     QWEN_TTS_API_STYLE,
     QWEN_TTS_BASE_URL,
     QWEN_TTS_LANGUAGE,
     QWEN_TTS_MODEL,
     QWEN_TTS_TIMEOUT,
+    SUPPORTED_TTS_PROVIDERS,
     TTS_DEVICE,
     TTS_PROVIDER,
     TTS_VOICE,
@@ -70,6 +78,13 @@ class TTSProvider(ABC):
     def list_voices(self) -> Dict[str, list[str]]:
         return ENGLISH_VOICES
 
+    def list_voice_choices(self) -> list[dict]:
+        voices = []
+        for group, group_voices in self.list_voices().items():
+            for voice in group_voices:
+                voices.append({"id": voice, "label": voice, "group": group})
+        return voices
+
     def transcribe_reference_audio(self, audio_bytes: bytes, filename: str) -> Optional[str]:
         return None
 
@@ -88,6 +103,7 @@ class KokoroProvider(TTSProvider):
         self.device = self._resolve_device()
         self.default_voice = TTS_VOICE
         self._pipeline = KPipeline(repo_id="hexgrad/Kokoro-82M", lang_code="a", device=self.device)
+        self._lock = threading.Lock()  # KPipeline holds CUDA state and is NOT thread-safe
         logger.info("Loaded Kokoro provider on %s", self.device)
 
     def _resolve_device(self) -> str:
@@ -107,18 +123,19 @@ class KokoroProvider(TTSProvider):
         speed: float = 1.0,
         profile: Optional[dict] = None,
     ) -> np.ndarray:
-        chunks = []
-        for _, _, audio in self._pipeline(text, voice=voice or self.default_voice):
-            if isinstance(audio, self._torch.Tensor):
-                audio = audio.detach().cpu().numpy()
-            chunks.append(np.asarray(audio, dtype=np.float32))
+        with self._lock:
+            chunks = []
+            for _, _, audio in self._pipeline(text, voice=voice or self.default_voice):
+                if isinstance(audio, self._torch.Tensor):
+                    audio = audio.detach().cpu().numpy()
+                chunks.append(np.asarray(audio, dtype=np.float32))
 
-        if not chunks:
-            raise RuntimeError("Kokoro returned no audio chunks")
+            if not chunks:
+                raise RuntimeError("Kokoro returned no audio chunks")
 
-        if len(chunks) == 1:
-            return chunks[0]
-        return np.concatenate(chunks)
+            if len(chunks) == 1:
+                return chunks[0]
+            return np.concatenate(chunks)
 
     def health(self) -> Dict[str, object]:
         gpu_name: Optional[str] = None
@@ -147,6 +164,7 @@ class Qwen3Provider(TTSProvider):
         self.default_voice = "alloy"
         self.default_language = QWEN_TTS_LANGUAGE
         self.timeout = httpx.Timeout(QWEN_TTS_TIMEOUT)
+        self.sample_rate = 24000  # Updated by _decode_audio when actual server rate is known
 
     def _decode_audio(self, audio_bytes: bytes) -> np.ndarray:
         audio, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
@@ -352,10 +370,187 @@ class Qwen3Provider(TTSProvider):
         return payload.get("text")
 
 
-@lru_cache(maxsize=1)
-def get_tts_provider() -> TTSProvider:
-    if TTS_PROVIDER == "kokoro":
+class ElevenLabsProvider(TTSProvider):
+    def __init__(self):
+        self.base_url = ELEVENLABS_BASE_URL
+        self.api_key = ELEVENLABS_API_KEY
+        self.model = ELEVENLABS_MODEL_ID
+        self.output_format = ELEVENLABS_OUTPUT_FORMAT
+        self.timeout = httpx.Timeout(ELEVENLABS_TIMEOUT)
+        self.default_voice = ELEVENLABS_VOICE_ID
+        self.sample_rate = self._sample_rate_from_output_format(self.output_format)
+
+        if not self.api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY is not configured")
+
+    @staticmethod
+    def _sample_rate_from_output_format(output_format: str) -> int:
+        parts = (output_format or "").split("_")
+        if len(parts) >= 2 and parts[1].isdigit():
+            return int(parts[1])
+        return 24000
+
+    def _headers(self) -> dict:
+        return {
+            "xi-api-key": self.api_key,
+            "Accept": "application/json",
+        }
+
+    def _raise_for_status(self, response: httpx.Response, context: str) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = response.text.strip()
+            raise RuntimeError(f"{context}: {detail or exc}") from exc
+
+    def _list_voice_records(self) -> list[dict]:
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.get(
+                f"{self.base_url}/v2/voices",
+                headers=self._headers(),
+                params={"page_size": 100, "include_total_count": "false"},
+            )
+        self._raise_for_status(response, "ElevenLabs voice listing failed")
+        payload = response.json()
+        return payload.get("voices", []) or []
+
+    def _resolve_voice_id(self, voice: str) -> str:
+        candidate = (voice or self.default_voice or "").strip()
+        if candidate:
+            return candidate
+
+        voices = self._list_voice_records()
+        if voices:
+            voice_id = str(voices[0].get("voice_id") or "").strip()
+            if voice_id:
+                return voice_id
+
+        raise RuntimeError(
+            "No ElevenLabs voice is configured. Choose an ElevenLabs voice in the app or set ELEVENLABS_VOICE_ID."
+        )
+
+    def _decode_audio(self, audio_bytes: bytes) -> np.ndarray:
+        if self.output_format.startswith("pcm_"):
+            if len(audio_bytes) % 2 != 0:
+                raise RuntimeError("ElevenLabs PCM payload had an unexpected byte length")
+            audio = np.frombuffer(audio_bytes, dtype="<i2").astype(np.float32) / 32768.0
+            return np.asarray(audio, dtype=np.float32)
+
+        audio, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
+        self.sample_rate = sample_rate
+        if isinstance(audio, np.ndarray) and audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        return np.asarray(audio, dtype=np.float32)
+
+    def synthesize(
+        self,
+        text: str,
+        voice: str,
+        *,
+        speed: float = 1.0,
+        profile: Optional[dict] = None,
+    ) -> np.ndarray:
+        voice_id = self._resolve_voice_id(voice)
+        payload = {
+            "text": text,
+            "model_id": self.model,
+            "voice_settings": {
+                "speed": speed,
+            },
+        }
+
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(
+                f"{self.base_url}/v1/text-to-speech/{voice_id}",
+                headers=self._headers(),
+                params={"output_format": self.output_format},
+                json=payload,
+            )
+        self._raise_for_status(response, "ElevenLabs speech synthesis failed")
+        return self._decode_audio(response.content)
+
+    def health(self) -> Dict[str, object]:
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.get(
+                    f"{self.base_url}/v2/voices",
+                    headers=self._headers(),
+                    params={"page_size": 1, "include_total_count": "false"},
+                )
+            self._raise_for_status(response, "ElevenLabs health check failed")
+            return {
+                "provider": "elevenlabs",
+                "available": True,
+                "base_url": self.base_url,
+                "model": self.model,
+                "default_voice": self.default_voice or None,
+                "sample_rate": self.sample_rate,
+                "output_format": self.output_format,
+                "supports_voice_cloning": False,
+                "gpu_available": False,
+                "gpu_name": None,
+                "device": "cloud",
+            }
+        except Exception as exc:
+            return {
+                "provider": "elevenlabs",
+                "available": False,
+                "base_url": self.base_url,
+                "model": self.model,
+                "default_voice": self.default_voice or None,
+                "sample_rate": self.sample_rate,
+                "output_format": self.output_format,
+                "supports_voice_cloning": False,
+                "gpu_available": False,
+                "gpu_name": None,
+                "device": "cloud",
+                "error": str(exc),
+            }
+
+    def list_voices(self) -> Dict[str, list[str]]:
+        records = self._list_voice_records()
+        groups: Dict[str, list[str]] = {}
+        for record in records:
+            voice_id = str(record.get("voice_id") or "").strip()
+            if not voice_id:
+                continue
+            category = str(record.get("category") or "other").strip().title()
+            group_name = f"ElevenLabs {category}"
+            groups.setdefault(group_name, []).append(voice_id)
+
+        if groups:
+            return groups
+        return {"ElevenLabs Voices": [self.default_voice]} if self.default_voice else {"ElevenLabs Voices": []}
+
+    def list_voice_choices(self) -> list[dict]:
+        records = self._list_voice_records()
+        voices = []
+        for record in records:
+            voice_id = str(record.get("voice_id") or "").strip()
+            if not voice_id:
+                continue
+            name = str(record.get("name") or voice_id).strip()
+            category = str(record.get("category") or "other").strip().title()
+            voices.append(
+                {
+                    "id": voice_id,
+                    "label": f"{name} ({voice_id[:8]})",
+                    "name": name,
+                    "group": f"ElevenLabs {category}",
+                }
+            )
+        return voices
+
+
+@lru_cache(maxsize=8)
+def get_tts_provider(provider_name: Optional[str] = None) -> TTSProvider:
+    resolved_provider = (provider_name or TTS_PROVIDER).strip().lower()
+    if resolved_provider not in SUPPORTED_TTS_PROVIDERS:
+        raise RuntimeError(f"Unsupported TTS provider: {resolved_provider}")
+    if resolved_provider == "kokoro":
         return KokoroProvider()
-    if TTS_PROVIDER == "qwen3":
+    if resolved_provider == "qwen3":
         return Qwen3Provider()
-    raise RuntimeError(f"Unsupported TTS provider: {TTS_PROVIDER}")
+    if resolved_provider == "elevenlabs":
+        return ElevenLabsProvider()
+    raise RuntimeError(f"Unsupported TTS provider: {resolved_provider}")

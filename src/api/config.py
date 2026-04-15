@@ -67,9 +67,10 @@ else:
 
 # ==================== TTS ====================
 
+SUPPORTED_TTS_PROVIDERS = {"kokoro", "qwen3", "elevenlabs"}
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "kokoro").strip().lower()
-if TTS_PROVIDER not in {"kokoro", "qwen3"}:
-    raise ValueError("TTS_PROVIDER must be one of: kokoro, qwen3")
+if TTS_PROVIDER not in SUPPORTED_TTS_PROVIDERS:
+    raise ValueError("TTS_PROVIDER must be one of: kokoro, qwen3, elevenlabs")
 
 TTS_DEVICE = os.getenv("TTS_DEVICE", "auto").strip().lower()
 if TTS_DEVICE not in {"auto", "cuda", "cpu"}:
@@ -88,6 +89,15 @@ if QWEN_TTS_API_STYLE not in {"demo", "openai"}:
 
 QWEN_TTS_TIMEOUT = float(os.getenv("QWEN_TTS_TIMEOUT", "180"))
 QWEN_TTS_LANGUAGE = os.getenv("QWEN_TTS_LANGUAGE", "English")
+
+# ==================== ElevenLabs ====================
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_BASE_URL = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io").rstrip("/")
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2").strip()
+ELEVENLABS_OUTPUT_FORMAT = os.getenv("ELEVENLABS_OUTPUT_FORMAT", "pcm_24000").strip()
+ELEVENLABS_TIMEOUT = float(os.getenv("ELEVENLABS_TIMEOUT", "180"))
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 
 # ==================== Audio Storage ====================
 

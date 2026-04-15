@@ -6,7 +6,7 @@ import re
 import logging
 from pathlib import Path
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Body
 from typing import Optional, List
 
 from ..database import get_db, dict_from_row, list_from_rows, db_execute
@@ -112,16 +112,19 @@ def sync_novels_to_db():
         
         for novel in novels:
             # Check if novel exists
-            cursor.execute('SELECT id FROM novels WHERE slug = ?', (novel['slug'],))
+            cursor.execute('SELECT id, chapter_count, source_toc_url FROM novels WHERE slug = ?', (novel['slug'],))
             existing = cursor.fetchone()
             
             if existing:
+                existing_count = int(existing['chapter_count'] or 0)
+                local_count = int(novel['chapter_count'] or 0)
+                preserved_count = max(existing_count, local_count) if existing['source_toc_url'] else local_count
                 # Update existing novel
                 cursor.execute('''
                     UPDATE novels 
                     SET chapter_count = ?, last_updated = ?, data_path = ?
                     WHERE slug = ?
-                ''', (novel['chapter_count'], novel['last_updated'], 
+                ''', (preserved_count, novel['last_updated'], 
                       novel['data_path'], novel['slug']))
             else:
                 # Insert new novel
@@ -253,24 +256,40 @@ async def list_novels(
 
 
 @router.delete("/admin/clear-all")
-async def clear_all_novels():
+async def clear_all_novels(confirm: str = Body(..., embed=True)):
     """
     DANGER: Delete ALL novels and chapters from database
     
     Use this to reset the database before re-migration.
     This is irreversible!
+    
+    Requires {"confirm": "DELETE ALL"} in the request body.
+    Disabled in production (PostgreSQL) mode.
     """
+    from ..config import DATABASE_BACKEND
+
+    if confirm != "DELETE ALL":
+        raise HTTPException(
+            status_code=400,
+            detail='Send {"confirm": "DELETE ALL"} in the request body to confirm this destructive action.',
+        )
+    if DATABASE_BACKEND != "sqlite":
+        raise HTTPException(
+            status_code=403,
+            detail="Bulk delete is disabled in production. Use database migrations instead.",
+        )
+
     with get_db() as conn:
         cursor = conn.cursor()
         
         # Get counts before deletion
-        cursor.execute('SELECT COUNT(*) FROM chapters')
+        cursor.execute('SELECT COUNT(*) AS count FROM chapters')
         result = cursor.fetchone()
-        chapters_count = result[0] if isinstance(result, (list, tuple)) else result.get('count', 0)
+        chapters_count = result['count'] if hasattr(result, 'keys') else result[0]
         
-        cursor.execute('SELECT COUNT(*) FROM novels')
+        cursor.execute('SELECT COUNT(*) AS count FROM novels')
         result = cursor.fetchone()
-        novels_count = result[0] if isinstance(result, (list, tuple)) else result.get('count', 0)
+        novels_count = result['count'] if hasattr(result, 'keys') else result[0]
         
         # Delete chapters first (foreign key)
         cursor.execute('DELETE FROM chapters')
@@ -278,9 +297,7 @@ async def clear_all_novels():
         # Delete novels
         cursor.execute('DELETE FROM novels')
         
-        conn.commit()
-        
-        logger.info(f"Cleared database: {novels_count} novels, {chapters_count} chapters")
+        logger.warning("Cleared database: %d novels, %d chapters (user-confirmed)", novels_count, chapters_count)
         
         return {
             'message': 'Database cleared successfully',
@@ -470,7 +487,7 @@ async def update_novel(slug: str, request: Optional[NovelUpdateRequest] = None):
     from .scraper import check_scraper_available, scrape_jobs, run_scraper_job
     check_scraper_available()  # Returns 503 if deps not installed
     
-    from scraper import NovelScraper
+    from .scraper import NovelScraper
     
     # Get novel from DB
     with get_db() as conn:
@@ -522,6 +539,17 @@ async def update_novel(slug: str, request: Optional[NovelUpdateRequest] = None):
         total_chapters = await asyncio.to_thread(scraper.get_total_chapters, source_toc_url)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to detect chapters: {str(e)}")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE novels
+            SET chapter_count = ?, last_updated = ?
+            WHERE slug = ?
+            """,
+            (total_chapters, datetime.utcnow(), slug),
+        )
     
     # Find missing chapters
     all_chapters = set(range(1, total_chapters + 1))
@@ -554,7 +582,7 @@ async def update_novel(slug: str, request: Optional[NovelUpdateRequest] = None):
     # Start scraper in background
     thread = threading.Thread(
         target=run_scraper_job,
-        args=(job_id, source_toc_url, start_chapter, end_chapter),
+        args=(job_id, source_toc_url, start_chapter, end_chapter, total_chapters),
         daemon=True,
     )
     thread.start()

@@ -70,9 +70,13 @@ chrome_profile/
 
 # Application data
 data/output/
+data/smoke-scraper/
 Segmentor/output/
 audio/
 logs/*.log
+src/SCRAPER/output/
+src/SCRAPER/logs/
+*.db
 setup.py
 
 # OS

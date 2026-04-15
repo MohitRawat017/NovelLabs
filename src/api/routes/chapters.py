@@ -6,10 +6,12 @@ import logging
 import httpx
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
 
 from ..database import get_db, dict_from_row, list_from_rows
+from ..config import NOVEL_OUTPUT_DIR
 from ..models.schemas import ChapterResponse, ChapterListResponse, ChapterContentResponse
 
 router = APIRouter()
@@ -18,6 +20,32 @@ logger = logging.getLogger(__name__)
 # Base directory
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 AUDIO_DIR = BASE_DIR / "audio"
+_ALLOWED_DATA_ROOT = Path(NOVEL_OUTPUT_DIR).resolve()
+
+
+def _validate_content_path(content_path: str) -> str:
+    """Ensure content_path resolves to within the allowed novel data directory."""
+    resolved = Path(content_path).resolve()
+    if not str(resolved).startswith(str(_ALLOWED_DATA_ROOT)):
+        raise HTTPException(
+            status_code=400,
+            detail="content_path must be within the novel data directory",
+        )
+    return str(resolved)
+
+
+_BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "[::1]"}
+
+
+def _validate_content_url(url: str) -> str:
+    """Block internal/metadata URLs to prevent SSRF."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed")
+    hostname = (parsed.hostname or "").lower()
+    if hostname in _BLOCKED_HOSTS or hostname.startswith("10.") or hostname.startswith("192.168."):
+        raise HTTPException(status_code=400, detail="Internal or metadata URLs are not allowed")
+    return url
 
 
 def _normalize_chapter_audio_metadata(chapter: dict) -> dict:
@@ -126,6 +154,7 @@ async def update_chapter_content_url(slug: str, chapter_number: int, data: Conte
     Local-first runs read chapter text from the filesystem. This endpoint is
     kept for backward compatibility only.
     """
+    safe_url = _validate_content_url(data.content_url)
     with get_db() as conn:
         cursor = conn.cursor()
         
@@ -141,14 +170,14 @@ async def update_chapter_content_url(slug: str, chapter_number: int, data: Conte
             UPDATE chapters 
             SET content_url = ?
             WHERE novel_id = ? AND chapter_number = ?
-        ''', (data.content_url, novel['id'], chapter_number))
+        ''', (safe_url, novel['id'], chapter_number))
         
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Chapter not found")
         
         conn.commit()
     
-    return {"message": "Content URL updated", "content_url": data.content_url}
+    return {"message": "Content URL updated", "content_url": safe_url}
 
 
 @router.post("/metadata")
@@ -187,11 +216,12 @@ async def create_chapter_metadata(chapter: ChapterMetadataCreate):
             raise HTTPException(status_code=409, detail="Chapter already exists")
         
         # FIXED: Insert chapter WITHOUT content column
+        safe_path = _validate_content_path(chapter.content_path)
         cursor.execute('''
             INSERT INTO chapters (novel_id, chapter_number, title, content_path, word_count)
             VALUES (?, ?, ?, ?, ?)
         ''', (novel_id, chapter.chapter_number, chapter.title, 
-              chapter.content_path, chapter.word_count))
+              safe_path, chapter.word_count))
         
         conn.commit()
         
@@ -249,11 +279,12 @@ async def create_chapter(chapter: ChapterCreate):
         # FIXED: Prefer content_path over content
         if chapter.content_path:
             # Store only metadata
+            safe_path = _validate_content_path(chapter.content_path)
             cursor.execute('''
                 INSERT INTO chapters (novel_id, chapter_number, title, content_path, word_count)
                 VALUES (?, ?, ?, ?, ?)
             ''', (novel_id, chapter.chapter_number, chapter.title, 
-                  chapter.content_path, word_count))
+                  safe_path, word_count))
         elif chapter.content:
             # LEGACY: Store content (causes bloat)
             print(f"[WARN] Storing content in DB for chapter {chapter.chapter_number} - consider using content_path instead")
