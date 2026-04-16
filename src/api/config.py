@@ -10,7 +10,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -152,6 +151,7 @@ else:
 # ==================== Logging ====================
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+AUTO_SYNC_NOVELS_ON_STARTUP = _get_bool_env("AUTO_SYNC_NOVELS_ON_STARTUP", True)
 
 # ==================== Scraper ====================
 

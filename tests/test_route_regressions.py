@@ -40,9 +40,14 @@ class TestRouteRegressions(unittest.TestCase):
             "DATABASE_BACKEND": os.environ.get("DATABASE_BACKEND"),
             "SQLITE_DB_PATH": os.environ.get("SQLITE_DB_PATH"),
             "AUDIO_DIR": os.environ.get("AUDIO_DIR"),
+            "NOVEL_OUTPUT_DIR": os.environ.get("NOVEL_OUTPUT_DIR"),
+            "AUTO_SYNC_NOVELS_ON_STARTUP": os.environ.get("AUTO_SYNC_NOVELS_ON_STARTUP"),
             "SCRAPER_ENABLED": os.environ.get("SCRAPER_ENABLED"),
             "TTS_PROVIDER": os.environ.get("TTS_PROVIDER"),
         }
+
+        self.output_dir = base / "output"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.env_path = base / ".env"
         self.env_path.write_text(
@@ -51,6 +56,8 @@ class TestRouteRegressions(unittest.TestCase):
                     "DATABASE_BACKEND=sqlite",
                     f"SQLITE_DB_PATH={self.db_path}",
                     f"AUDIO_DIR={self.audio_dir}",
+                    f"NOVEL_OUTPUT_DIR={self.output_dir}",
+                    "AUTO_SYNC_NOVELS_ON_STARTUP=false",
                     "SCRAPER_ENABLED=false",
                     "TTS_PROVIDER=kokoro",
                 ]
@@ -63,6 +70,8 @@ class TestRouteRegressions(unittest.TestCase):
         os.environ["DATABASE_BACKEND"] = "sqlite"
         os.environ["SQLITE_DB_PATH"] = str(self.db_path)
         os.environ["AUDIO_DIR"] = str(self.audio_dir)
+        os.environ["NOVEL_OUTPUT_DIR"] = str(self.output_dir)
+        os.environ["AUTO_SYNC_NOVELS_ON_STARTUP"] = "false"
         os.environ["SCRAPER_ENABLED"] = "false"
         os.environ["TTS_PROVIDER"] = "kokoro"
 
@@ -120,6 +129,7 @@ class TestRouteRegressions(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:5173")
+
     def test_dynamic_localhost_port_preflight_is_allowed_in_sqlite_mode(self):
         with TestClient(self.main.app) as client:
             response = client.options(
@@ -132,6 +142,18 @@ class TestRouteRegressions(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:5174")
+
+    def test_storage_stats_reports_table_counts_and_sync_flag(self):
+        with TestClient(self.main.app) as client:
+            response = client.get("/api/novels/admin/storage-stats")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["database_backend"], "sqlite")
+        self.assertFalse(payload["auto_sync_novels_on_startup"])
+        self.assertEqual(payload["filesystem_novel_count"], 0)
+        self.assertIn("counts", payload)
+        self.assertGreaterEqual(payload["counts"]["novels"], 1)
 
     def test_scraper_jobs_returns_503_when_disabled(self):
         with TestClient(self.main.app) as client:
@@ -498,6 +520,109 @@ class TestRouteRegressions(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertIn("Live audio job not found", response.json()["detail"])
+
+    def test_admin_reset_database_wipes_all_data_tables(self):
+        with self.database.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO chapters (novel_id, chapter_number, title, content_path, word_count)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    self.novel_id,
+                    11,
+                    "Reset target chapter",
+                    str(Path(self.temp_dir.name) / "output" / "chapter_11.txt"),
+                    950,
+                ),
+            )
+            chapter_id = cursor.lastrowid
+
+            cursor.execute(
+                """
+                INSERT INTO audio_segments (chapter_id, segment_index, text, audio_url, duration, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (chapter_id, 0, "hello", "/audio/demo.wav", 1.2, "completed"),
+            )
+            cursor.execute(
+                """
+                INSERT INTO chapter_audio (novel_slug, chapter_number, provider, voice, status, audio_url, duration, progress, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    "route-regression-novel",
+                    11,
+                    "kokoro",
+                    "af_heart",
+                    "completed",
+                    "/audio/route-regression-novel/Chapter_0011.wav",
+                    14.3,
+                    100.0,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO audio_timings (novel_slug, chapter_number, chunk_index, start_time, end_time, text)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("route-regression-novel", 11, 0, 0.0, 1.0, "hello"),
+            )
+            cursor.execute(
+                """
+                INSERT INTO novel_tts_profiles (novel_id, provider, voice_name, display_name, ref_audio_path, ref_text, language)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.novel_id,
+                    "kokoro",
+                    "af_heart",
+                    "Default",
+                    str(Path(self.temp_dir.name) / "profiles" / "voice.wav"),
+                    "sample",
+                    "en",
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO user_progress (novel_id, last_chapter, scroll_position)
+                VALUES (?, ?, ?)
+                """,
+                (self.novel_id, 11, 0.5),
+            )
+
+        with TestClient(self.main.app) as client:
+            response = client.post(
+                "/api/novels/admin/reset-database",
+                json={"confirm": "DELETE ALL"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["counts_after"]["novels"], 0)
+        self.assertEqual(payload["counts_after"]["chapters"], 0)
+        self.assertEqual(payload["counts_after"]["audio_segments"], 0)
+        self.assertEqual(payload["counts_after"]["chapter_audio"], 0)
+        self.assertEqual(payload["counts_after"]["audio_timings"], 0)
+        self.assertEqual(payload["counts_after"]["novel_tts_profiles"], 0)
+        self.assertEqual(payload["counts_after"]["user_progress"], 0)
+        self.assertEqual(payload["counts_after"]["user_preferences"], 1)
+
+        with self.database.get_db() as conn:
+            cursor = conn.cursor()
+            for table_name, expected_count in {
+                "novels": 0,
+                "chapters": 0,
+                "audio_segments": 0,
+                "chapter_audio": 0,
+                "audio_timings": 0,
+                "novel_tts_profiles": 0,
+                "user_progress": 0,
+                "user_preferences": 1,
+            }.items():
+                cursor.execute(f"SELECT COUNT(*) AS count FROM {table_name}")
+                self.assertEqual(cursor.fetchone()["count"], expected_count)
 
 
 if __name__ == "__main__":

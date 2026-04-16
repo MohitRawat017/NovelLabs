@@ -310,6 +310,12 @@ def _require_provider(provider_name: Optional[str] = None):
     try:
         return get_tts_provider(resolved_provider)
     except Exception as exc:
+        logger.error(
+            "TTS provider initialization failed for provider=%s: %s",
+            resolved_provider,
+            exc,
+            exc_info=True,
+        )
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
@@ -446,6 +452,14 @@ def _mark_audio_job_cancelled(
         provider_name=provider_name,
         progress=cancelled_progress,
         error="Cancelled by user",
+    )
+    logger.info(
+        "Audio job marked cancelled: job_key=%s novel=%s chapter=%s provider=%s progress=%.2f",
+        job_key,
+        novel_slug,
+        chapter_number,
+        provider_name,
+        cancelled_progress,
     )
 
 
@@ -896,13 +910,20 @@ async def pause_audio_job(novel_slug: str, chapter_number: int):
     job_key = _audio_job_key(novel_slug, chapter_number)
     job = tts_jobs.get(job_key)
     if not job:
+        logger.warning("Pause requested for missing live job: job_key=%s", job_key)
         raise HTTPException(status_code=404, detail="Live audio job not found")
 
     current_status = job.get("status")
     if current_status in AUDIO_TERMINAL_STATUSES:
+        logger.info(
+            "Pause skipped because job already terminal: job_key=%s status=%s",
+            job_key,
+            current_status,
+        )
         return {"message": f"Job already {current_status}", "status": current_status}
 
     if current_status == "paused":
+        logger.info("Pause requested for already paused job: job_key=%s", job_key)
         return {"message": "Audio job already paused", "status": "paused"}
 
     if current_status not in AUDIO_RUNNING_STATUSES:
@@ -927,6 +948,14 @@ async def pause_audio_job(novel_slug: str, chapter_number: int):
         progress=progress,
         error=None,
     )
+    logger.info(
+        "Audio job paused: job_key=%s novel=%s chapter=%s provider=%s progress=%.2f",
+        job_key,
+        novel_slug,
+        chapter_number,
+        provider_name,
+        progress,
+    )
     return {"message": "Audio job paused", "status": "paused"}
 
 
@@ -935,13 +964,24 @@ async def resume_audio_job(novel_slug: str, chapter_number: int):
     job_key = _audio_job_key(novel_slug, chapter_number)
     job = tts_jobs.get(job_key)
     if not job:
+        logger.warning("Resume requested for missing live job: job_key=%s", job_key)
         raise HTTPException(status_code=404, detail="Live audio job not found")
 
     current_status = job.get("status")
     if current_status in AUDIO_TERMINAL_STATUSES:
+        logger.info(
+            "Resume skipped because job already terminal: job_key=%s status=%s",
+            job_key,
+            current_status,
+        )
         return {"message": f"Job already {current_status}", "status": current_status}
 
     if current_status != "paused":
+        logger.info(
+            "Resume requested for non-paused job: job_key=%s status=%s",
+            job_key,
+            current_status,
+        )
         return {"message": f"Job is {current_status}, nothing to resume", "status": current_status}
 
     progress = _safe_progress(job.get("progress"))
@@ -961,6 +1001,14 @@ async def resume_audio_job(novel_slug: str, chapter_number: int):
         provider_name=provider_name,
         progress=progress,
         error=None,
+    )
+    logger.info(
+        "Audio job resumed: job_key=%s novel=%s chapter=%s provider=%s progress=%.2f",
+        job_key,
+        novel_slug,
+        chapter_number,
+        provider_name,
+        progress,
     )
     return {"message": "Audio job resumed", "status": "generating"}
 
@@ -984,10 +1032,16 @@ async def cancel_audio_job(novel_slug: str, chapter_number: int):
             row = cursor.fetchone()
 
         if not row:
+            logger.warning("Cancel requested but no persisted job found: job_key=%s", job_key)
             raise HTTPException(status_code=404, detail="Audio job not found")
 
         current_status = row["status"]
         if current_status in AUDIO_TERMINAL_STATUSES:
+            logger.info(
+                "Cancel skipped because persisted job already terminal: job_key=%s status=%s",
+                job_key,
+                current_status,
+            )
             return {"message": f"Job already {current_status}", "status": current_status}
 
         _save_audio_metadata(
@@ -998,6 +1052,11 @@ async def cancel_audio_job(novel_slug: str, chapter_number: int):
             provider_name=row["provider"] or TTS_PROVIDER,
             progress=_safe_progress(row["progress"]),
             error="Cancelled by user",
+        )
+        logger.info(
+            "Marked stale persisted job as cancelled: job_key=%s status=%s",
+            job_key,
+            current_status,
         )
         return {
             "message": "No live worker found. Marked stale audio job as cancelled",
@@ -1015,6 +1074,7 @@ async def cancel_audio_job(novel_slug: str, chapter_number: int):
         job.get("voice") or "af_heart",
         job.get("provider") or TTS_PROVIDER,
     )
+    logger.info("Cancel request applied to live audio job: job_key=%s", job_key)
     return {"message": "Audio job cancelled", "status": "cancelled"}
 
 
@@ -1029,9 +1089,23 @@ async def generate_chapter_audio(
 ):
     job_key = _audio_job_key(novel_slug, chapter_number)
     resolved_provider = _resolve_provider_name(provider)
+    logger.info(
+        "Audio generation request received: novel=%s chapter=%s provider=%s voice=%s force=%s",
+        novel_slug,
+        chapter_number,
+        resolved_provider,
+        voice,
+        force,
+    )
     provider = _require_provider(resolved_provider)
     profile = _get_novel_tts_profile(novel_slug, resolved_provider)
     if getattr(provider, "supports_voice_cloning", False) and not profile:
+        logger.warning(
+            "Rejected generation request due to missing voice profile: novel=%s chapter=%s provider=%s",
+            novel_slug,
+            chapter_number,
+            resolved_provider,
+        )
         raise HTTPException(
             status_code=400,
             detail=f"No saved {resolved_provider} voice profile for this novel. Upload one from the novel page first.",
@@ -1041,6 +1115,11 @@ async def generate_chapter_audio(
     if live_job and not force:
         live_status = live_job.get("status")
         if live_status in {"generating", "paused"}:
+            logger.info(
+                "Skipped generation request because live job already %s: job_key=%s",
+                live_status,
+                job_key,
+            )
             return {
                 "status": "paused" if live_status == "paused" else "already_generating",
                 "message": (
@@ -1065,6 +1144,12 @@ async def generate_chapter_audio(
 
     if existing:
         if existing["status"] == "completed" and existing["provider"] == resolved_provider and not force:
+            logger.info(
+                "Skipped generation because audio already exists: novel=%s chapter=%s provider=%s",
+                novel_slug,
+                chapter_number,
+                resolved_provider,
+            )
             return {
                 "status": "exists",
                 "message": "Audio already generated",
@@ -1073,6 +1158,13 @@ async def generate_chapter_audio(
                 "provider": resolved_provider,
             }
         if existing["status"] in {"generating", "paused"} and not force:
+            logger.info(
+                "Skipped generation because persisted job already %s: novel=%s chapter=%s provider=%s",
+                existing["status"],
+                novel_slug,
+                chapter_number,
+                resolved_provider,
+            )
             return {
                 "status": "paused" if existing["status"] == "paused" else "already_generating",
                 "message": (
@@ -1126,6 +1218,15 @@ async def generate_chapter_audio(
     }
     background_tasks.add_task(run_tts_generation, novel_slug, chapter_number, content, voice, job_key, provider_name)
 
+    logger.info(
+        "Audio generation queued: job_key=%s novel=%s chapter=%s provider=%s chars=%s",
+        job_key,
+        novel_slug,
+        chapter_number,
+        provider_name,
+        len(content),
+    )
+
     return {
         "status": "queued",
         "message": f"Audio generation started for {novel_slug} chapter {chapter_number}",
@@ -1148,11 +1249,26 @@ def run_tts_generation(
     audio_path, timing_path = _get_audio_paths(novel_slug, chapter_number)
     profile = _get_novel_tts_profile(novel_slug, provider_name)
     provider_name = provider.health().get("provider", provider_name)
+    logger.info(
+        "Audio generation worker started: job_key=%s novel=%s chapter=%s provider=%s voice=%s chars=%s",
+        job_key,
+        novel_slug,
+        chapter_number,
+        provider_name,
+        voice,
+        len(text),
+    )
 
     try:
         chunks = split_text_into_chunks(text, max_length=500)
         if not chunks:
             raise ValueError("No chunks to process")
+
+        logger.info(
+            "TTS chunking complete for job_key=%s: total_chunks=%s",
+            job_key,
+            len(chunks),
+        )
 
         existing_job = tts_jobs.get(job_key, {})
         tts_jobs[job_key] = {

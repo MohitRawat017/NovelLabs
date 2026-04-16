@@ -4,13 +4,19 @@ import asyncio
 import os
 import re
 import logging
+import sqlite3
 from pathlib import Path
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Body
 from typing import Optional, List
 
 from ..database import get_db, dict_from_row, list_from_rows, db_execute
-from ..config import NOVEL_OUTPUT_DIR
+from ..config import (
+    AUTO_SYNC_NOVELS_ON_STARTUP,
+    DATABASE_BACKEND,
+    NOVEL_OUTPUT_DIR,
+    SQLITE_DB_PATH,
+)
 from ..models.schemas import NovelResponse, NovelListResponse, NovelCreate, NovelUpdateRequest
 
 router = APIRouter()
@@ -19,6 +25,39 @@ logger = logging.getLogger(__name__)
 # Base directory for scraped data
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 DATA_DIR = NOVEL_OUTPUT_DIR
+
+STORAGE_TABLES = [
+    "novels",
+    "chapters",
+    "audio_segments",
+    "chapter_audio",
+    "audio_timings",
+    "novel_tts_profiles",
+    "user_progress",
+    "user_preferences",
+]
+
+RESET_DELETE_ORDER = [
+    "audio_timings",
+    "audio_segments",
+    "chapter_audio",
+    "novel_tts_profiles",
+    "user_progress",
+    "chapters",
+    "novels",
+    "user_preferences",
+]
+
+RESET_SEQUENCE_TABLES = [
+    "novels",
+    "chapters",
+    "audio_segments",
+    "chapter_audio",
+    "audio_timings",
+    "novel_tts_profiles",
+    "user_progress",
+    "user_preferences",
+]
 
 
 def slugify(value: str) -> str:
@@ -101,6 +140,112 @@ def scan_novels_from_filesystem():
                 })
     
     return novels
+
+
+def _read_count(cursor, table: str) -> int:
+    cursor.execute(f"SELECT COUNT(*) AS count FROM {table}")
+    row = cursor.fetchone()
+    return int(row["count"] if hasattr(row, "keys") else row[0])
+
+
+def _collect_storage_counts(cursor) -> dict:
+    return {table: _read_count(cursor, table) for table in STORAGE_TABLES}
+
+
+def _vacuum_sqlite_db() -> None:
+    db_path = Path(SQLITE_DB_PATH)
+    with sqlite3.connect(db_path, timeout=30) as raw_conn:
+        raw_conn.execute("VACUUM")
+
+
+@router.get("/admin/storage-stats")
+async def storage_stats():
+    """Return per-table storage counts for DB reset/debug workflows."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        counts = _collect_storage_counts(cursor)
+
+    return {
+        "database_backend": DATABASE_BACKEND,
+        "auto_sync_novels_on_startup": AUTO_SYNC_NOVELS_ON_STARTUP,
+        "filesystem_novel_count": len(scan_novels_from_filesystem()),
+        "counts": counts,
+    }
+
+
+@router.post("/admin/reset-database")
+async def reset_database(
+    confirm: str = Body(..., embed=True),
+    reseed_preferences: bool = Body(True, embed=True),
+    reset_sequences: bool = Body(True, embed=True),
+    vacuum: bool = Body(False, embed=True),
+):
+    """
+    DANGER: Wipe all SQLite data tables while keeping source filesystem data intact.
+
+    Requires {"confirm": "DELETE ALL"} in the JSON body.
+    """
+    if confirm != "DELETE ALL":
+        raise HTTPException(
+            status_code=400,
+            detail='Send {"confirm": "DELETE ALL"} in the request body to confirm this destructive action.',
+        )
+    if DATABASE_BACKEND != "sqlite":
+        raise HTTPException(
+            status_code=403,
+            detail="Full database wipe is only enabled for SQLite mode.",
+        )
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        counts_before = _collect_storage_counts(cursor)
+
+        for table in RESET_DELETE_ORDER:
+            cursor.execute(f"DELETE FROM {table}")
+
+        if reset_sequences:
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
+            )
+            if cursor.fetchone():
+                placeholders = ", ".join(["?"] * len(RESET_SEQUENCE_TABLES))
+                cursor.execute(
+                    f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders})",
+                    tuple(RESET_SEQUENCE_TABLES),
+                )
+
+        if reseed_preferences:
+            cursor.execute("INSERT INTO user_preferences DEFAULT VALUES")
+
+        counts_after = _collect_storage_counts(cursor)
+
+    vacuumed = False
+    vacuum_error = None
+    if vacuum:
+        try:
+            _vacuum_sqlite_db()
+            vacuumed = True
+        except Exception as exc:
+            vacuum_error = str(exc)
+            logger.warning("SQLite VACUUM failed after reset: %s", exc)
+
+    logger.warning(
+        "Full SQLite reset completed (reseed_preferences=%s, reset_sequences=%s, vacuum=%s)",
+        reseed_preferences,
+        reset_sequences,
+        vacuumed,
+    )
+
+    return {
+        "message": "SQLite database reset completed",
+        "counts_before": counts_before,
+        "counts_after": counts_after,
+        "reseed_preferences": reseed_preferences,
+        "reset_sequences": reset_sequences,
+        "vacuum_requested": vacuum,
+        "vacuumed": vacuumed,
+        "vacuum_error": vacuum_error,
+    }
 
 
 def sync_novels_to_db():
@@ -266,8 +411,6 @@ async def clear_all_novels(confirm: str = Body(..., embed=True)):
     Requires {"confirm": "DELETE ALL"} in the request body.
     Disabled in production (PostgreSQL) mode.
     """
-    from ..config import DATABASE_BACKEND
-
     if confirm != "DELETE ALL":
         raise HTTPException(
             status_code=400,

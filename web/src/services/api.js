@@ -210,8 +210,13 @@ export async function deleteNovelVoiceProfile(slug, provider = null) {
     return fetchAPI(withProviderQuery(`/audio/profile/${slug}`, provider), { method: 'DELETE' });
 }
 
-export async function generateChapterAudio(slug, chapterNumber, voice = 'af_heart', provider = null) {
-    return fetchAPI(withProviderQuery(`/audio/generate/${slug}/${chapterNumber}?voice=${encodeURIComponent(voice)}`, provider), {
+export async function generateChapterAudio(slug, chapterNumber, voice = 'af_heart', provider = null, options = {}) {
+    const queryParams = new URLSearchParams({ voice });
+    if (options.force) {
+        queryParams.set('force', 'true');
+    }
+
+    return fetchAPI(withProviderQuery(`/audio/generate/${slug}/${chapterNumber}?${queryParams.toString()}`, provider), {
         method: 'POST',
     });
 }

@@ -67,6 +67,16 @@ CUDA: True
 
 ## Quick Start
 
+### Start Backend API (for the web app)
+```powershell
+python -m uvicorn src.api.main:app --reload --port 8001
+```
+
+Logs stream to terminal and rotating files under `logs/backend/`:
+- `app.log` (general backend flow)
+- `audio_progress.log` (TTS chunk/lifecycle events)
+- `errors.log` (warnings and exceptions)
+
 ### Scrape Novel
 ```powershell
 python src/scraper.py

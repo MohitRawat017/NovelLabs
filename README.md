@@ -105,8 +105,13 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 3. Start the server (runs on port 8001)
-uvicorn src.api.main:app --reload --port 8001
+python -m uvicorn src.api.main:app --reload --port 8001
 ```
+
+Backend logs are written to both terminal and rotating files:
+- `logs/backend/app.log` (general backend flow)
+- `logs/backend/audio_progress.log` (audio lifecycle and chunk progress)
+- `logs/backend/errors.log` (warnings, errors, and exceptions)
 
 ### 2. Start the Frontend
 ```bash
@@ -130,7 +135,7 @@ TTS_PROVIDER=kokoro
 TTS_DEVICE=auto
 TTS_VOICE=af_heart
 ```
-**To verify the active provider**: Look at the startup logs of your `uvicorn` backend. It will explicitly announce `[TTS_PROVIDER: kokoro]` during initialization.
+**To verify the active provider**: Look at startup logs for `Loaded Kokoro provider on ...` in terminal or `logs/backend/app.log`.
 
 > **Common Kokoro Pitfall**: If you encounter errors related to `misbah/soundfile` or unsupported dependencies, you are likely running Python 3.14 or a newer incompatible version. Recreate your `.venv` explicitly with Python 3.11 or 3.12.
 

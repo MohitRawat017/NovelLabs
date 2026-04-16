@@ -38,6 +38,14 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         Boolean(status?.status === 'cancelled' || status?.job_status === 'cancelled')
     ), []);
 
+    const isGenerationFailed = useCallback((status) => (
+        Boolean(status?.status === 'failed' || status?.job_status === 'failed')
+    ), []);
+
+    const canRetryGeneration = useCallback((status) => (
+        isGenerationFailed(status) || isGenerationCancelled(status)
+    ), [isGenerationCancelled, isGenerationFailed]);
+
     const isGenerationActive = useCallback((status) => (
         Boolean(status?.generating || status?.status === 'generating' || status?.job_status === 'generating')
     ), []);
@@ -169,7 +177,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         }
     };
 
-    const startAudioGeneration = async () => {
+    const startAudioGeneration = async ({ force = false } = {}) => {
         setIsLoading(true);
         setError(null);
         setGenerationStatus('Starting TTS generation...');
@@ -179,7 +187,7 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             const voice = provider === 'elevenlabs'
                 ? (settings?.elevenlabsVoice || '')
                 : (settings?.voice || 'af_heart');
-            const data = await generateChapterAudio(novelSlug, chapterNumber, voice, provider);
+            const data = await generateChapterAudio(novelSlug, chapterNumber, voice, provider, { force });
 
             if (data.status === 'exists') {
                 loadAudio(novelSlug, chapterNumber);
@@ -205,6 +213,15 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
             setError('Failed to start audio generation');
             setIsLoading(false);
         }
+    };
+
+    const handleRetry = async () => {
+        if (canRetryGeneration(generationInfo)) {
+            await startAudioGeneration({ force: true });
+            return;
+        }
+
+        await checkAudioStatus();
     };
 
     const pollForCompletion = () => {
@@ -421,8 +438,8 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                 ) : error ? (
                     <div className="flex flex-col items-center justify-center py-6 gap-3 text-red-500 text-center">
                         <span className="text-sm font-medium flex-1 px-4">{error}</span>
-                        <button className="px-4 py-2 mt-2 rounded-xl text-xs font-bold bg-white/50 dark:bg-white/10 hover:bg-white/80 dark:hover:bg-white/20 text-stone-700 dark:text-stone-300 transition-all border border-stone-200/50 dark:border-white/10" onClick={checkAudioStatus}>
-                            Retry Connection
+                        <button className="px-4 py-2 mt-2 rounded-xl text-xs font-bold bg-white/50 dark:bg-white/10 hover:bg-white/80 dark:hover:bg-white/20 text-stone-700 dark:text-stone-300 transition-all border border-stone-200/50 dark:border-white/10" onClick={handleRetry}>
+                            {canRetryGeneration(generationInfo) ? 'Retry Generation' : 'Retry Connection'}
                         </button>
                     </div>
                 ) : !audioReady && hasGenerationJob(generationInfo) ? (

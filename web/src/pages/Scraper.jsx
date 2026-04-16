@@ -156,7 +156,7 @@ function Scraper() {
                                     id="url"
                                     type="url"
                                     className="w-full bg-white/50 dark:bg-black/20 border border-stone-300/50 dark:border-white/10 rounded-2xl py-3 px-4 text-stone-800 dark:text-violet-100 placeholder:text-stone-500 dark:placeholder:text-violet-400/50 focus:outline-none focus:ring-2 focus:ring-violet-500/40 transition-all font-medium"
-                                    placeholder="https://novelhi.com/s/index/Novel-Name"
+                                    placeholder="https://freewebnovel.com/novel-name.html"
                                     value={url}
                                     onChange={(e) => setUrl(e.target.value)}
                                     required
