@@ -153,6 +153,7 @@ def get_db():
 
 def _schema_statements() -> List[str]:
     id_type = "SERIAL PRIMARY KEY" if DATABASE_BACKEND == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    has_audio_type = "BOOLEAN DEFAULT FALSE" if DATABASE_BACKEND == "postgres" else "INTEGER DEFAULT 0"
 
     return [
         f"""
@@ -160,6 +161,7 @@ def _schema_statements() -> List[str]:
             id {id_type},
             slug TEXT UNIQUE NOT NULL,
             title TEXT NOT NULL,
+            author TEXT,
             description TEXT,
             cover_url TEXT,
             genres TEXT,
@@ -180,7 +182,11 @@ def _schema_statements() -> List[str]:
             content TEXT,
             content_path TEXT,
             content_url TEXT,
+            r2_key TEXT,
             audio_path TEXT,
+            audio_key TEXT,
+            has_audio {has_audio_type},
+            status TEXT DEFAULT 'ready',
             word_count INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(novel_id, chapter_number)
@@ -295,6 +301,18 @@ def init_db() -> None:
             cursor.execute(statement)
 
         _ensure_column(cursor, "novels", "source_toc_url", "TEXT")
+        _ensure_column(cursor, "novels", "author", "TEXT")
+
+        _ensure_column(cursor, "chapters", "r2_key", "TEXT")
+        _ensure_column(cursor, "chapters", "audio_key", "TEXT")
+        _ensure_column(
+            cursor,
+            "chapters",
+            "has_audio",
+            "BOOLEAN DEFAULT FALSE" if DATABASE_BACKEND == "postgres" else "INTEGER DEFAULT 0",
+        )
+        _ensure_column(cursor, "chapters", "status", "TEXT DEFAULT 'ready'")
+
         _ensure_column(cursor, "chapter_audio", "provider", "TEXT DEFAULT 'kokoro'")
 
         cursor.execute("SELECT COUNT(*) AS count FROM user_preferences")

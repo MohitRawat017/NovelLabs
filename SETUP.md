@@ -97,13 +97,21 @@ python src/main.py
 
 ```
 audioBook/
-├── .venv/              # Virtual environment
-├── src/                # Source code
-├── data/output/        # Scraped chapters
-├── Segmentor/output/   # JSON segments
-├── audio/              # Generated audiobooks
-└── logs/               # Log files
+├── .venv/               # Virtual environment
+├── src/                 # Backend + scraper + segmenter code
+│   ├── api/             # FastAPI backend
+│   ├── SCRAPER/         # Active scraper package
+│   ├── scraper.py       # Local scrape entrypoint
+│   └── segmenter.py     # Local segmentation entrypoint
+├── web/                 # React frontend
+├── scripts/             # Operational scripts
+├── data/output/         # Scraped chapters
+├── Segmentor/output/    # JSON segments
+├── audio/               # Generated audiobooks
+└── logs/                # Log files
 ```
+
+For production-safe keep/archive guidance, see `docs/REPO_STRUCTURE.md`.
 
 ## Common Issues
 

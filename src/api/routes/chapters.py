@@ -4,15 +4,16 @@ import os
 import re
 import logging
 import httpx
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
 
 from ..database import get_db, dict_from_row, list_from_rows
-from ..config import NOVEL_OUTPUT_DIR
+from ..config import NOVEL_OUTPUT_DIR, READ_ONLY_MODE
 from ..models.schemas import ChapterResponse, ChapterListResponse, ChapterContentResponse
+from ..storage import build_audio_public_url, get_chapter_text
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -48,15 +49,58 @@ def _validate_content_url(url: str) -> str:
     return url
 
 
+def _resolve_audio_url(audio_key: Optional[str], audio_url: Optional[str]) -> Optional[str]:
+    return build_audio_public_url(audio_key) or audio_url
+
+
 def _normalize_chapter_audio_metadata(chapter: dict) -> dict:
     audio_path = chapter.get("audio_path")
+    audio_key = chapter.get("audio_key")
     audio_status = chapter.get("audio_status")
-    has_audio = bool(audio_path) or audio_status == "completed"
+    has_audio = bool(audio_path or audio_key or chapter.get("has_audio")) or audio_status == "completed"
     chapter["has_audio"] = has_audio
     chapter["audio_status"] = audio_status or ("completed" if has_audio else None)
     if has_audio:
         chapter["audio_provider"] = chapter.get("audio_provider") or "kokoro"
+    chapter["audio_url"] = build_audio_public_url(audio_key)
     return chapter
+
+
+def _read_local_content(content_path: Optional[str]) -> str:
+    if not content_path or not os.path.exists(content_path):
+        return ""
+
+    with open(content_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+        lines = content.split('\n')
+        if len(lines) > 2:
+            return '\n'.join(lines[2:]).strip()
+        return content
+
+
+async def _resolve_chapter_content(chapter: dict) -> str:
+    # Production-first read order: key-based object store -> URL -> local path -> DB fallback.
+    r2_key = chapter.get("r2_key")
+    if r2_key:
+        text = get_chapter_text(r2_key)
+        if text:
+            return text
+
+    content_url = chapter.get("content_url")
+    if content_url:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(content_url, timeout=10)
+                if resp.status_code == 200:
+                    return resp.text
+        except Exception as exc:
+            logger.warning("Failed to fetch chapter content URL '%s': %s", content_url, exc)
+
+    local_content = _read_local_content(chapter.get("content_path"))
+    if local_content:
+        return local_content
+
+    return chapter.get("content") or ""
 
 
 def sync_chapters_for_novel(novel_id: int, data_path: str):
@@ -146,6 +190,21 @@ class ContentUrlUpdate(BaseModel):
     content_url: str
 
 
+class ContentStorageUpdate(BaseModel):
+    """Canonical storage metadata update payload for chapter content/audio keys."""
+    r2_key: Optional[str] = None
+    content_url: Optional[str] = None
+    audio_key: Optional[str] = None
+    audio_url: Optional[str] = None
+    has_audio: Optional[bool] = None
+    status: Optional[str] = None
+    audio_provider: Optional[str] = None
+    audio_voice: Optional[str] = None
+    audio_duration: Optional[float] = None
+    audio_progress: Optional[float] = None
+    audio_error: Optional[str] = None
+
+
 @router.patch("/novel/{slug}/{chapter_number}/content-url")
 async def update_chapter_content_url(slug: str, chapter_number: int, data: ContentUrlUpdate):
     """
@@ -178,6 +237,160 @@ async def update_chapter_content_url(slug: str, chapter_number: int, data: Conte
         conn.commit()
     
     return {"message": "Content URL updated", "content_url": safe_url}
+
+
+@router.patch("/novel/{slug}/{chapter_number}/storage")
+async def update_chapter_storage(slug: str, chapter_number: int, data: ContentStorageUpdate):
+    """
+    Update canonical chapter storage metadata.
+
+    Intended for local ingestion/upload pipeline use, not public client writes.
+    """
+    chapter_updates = {}
+
+    if data.r2_key is not None:
+        chapter_updates["r2_key"] = data.r2_key.lstrip("/")
+    if data.content_url is not None:
+        chapter_updates["content_url"] = _validate_content_url(data.content_url)
+    if data.audio_key is not None:
+        chapter_updates["audio_key"] = data.audio_key.lstrip("/")
+    if data.has_audio is not None:
+        chapter_updates["has_audio"] = bool(data.has_audio)
+    if data.status is not None:
+        chapter_updates["status"] = data.status
+
+    audio_metadata_requested = any(
+        value is not None
+        for value in (
+            data.audio_key,
+            data.audio_url,
+            data.has_audio,
+            data.status,
+            data.audio_provider,
+            data.audio_voice,
+            data.audio_duration,
+            data.audio_progress,
+            data.audio_error,
+        )
+    )
+
+    if not chapter_updates and not audio_metadata_requested:
+        raise HTTPException(status_code=400, detail="No storage fields provided to update")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT id FROM novels WHERE slug = ?', (slug,))
+        novel = cursor.fetchone()
+
+        if not novel:
+            raise HTTPException(status_code=404, detail="Novel not found")
+
+        cursor.execute(
+            """
+            SELECT id, audio_key
+            FROM chapters
+            WHERE novel_id = ? AND chapter_number = ?
+            """,
+            (novel['id'], chapter_number),
+        )
+        chapter_row = dict_from_row(cursor.fetchone())
+        if not chapter_row:
+            raise HTTPException(status_code=404, detail="Chapter not found")
+
+        if chapter_updates:
+            set_parts = []
+            params = []
+            for field, value in chapter_updates.items():
+                set_parts.append(f"{field} = ?")
+                params.append(value)
+
+            params.extend([novel['id'], chapter_number])
+
+            cursor.execute(
+                f"""
+                UPDATE chapters
+                SET {', '.join(set_parts)}
+                WHERE novel_id = ? AND chapter_number = ?
+                """,
+                tuple(params),
+            )
+
+        if audio_metadata_requested:
+            cursor.execute(
+                """
+                SELECT provider, voice, status, audio_url, duration, error, progress
+                FROM chapter_audio
+                WHERE novel_slug = ? AND chapter_number = ?
+                """,
+                (slug, chapter_number),
+            )
+            existing_audio = dict_from_row(cursor.fetchone()) or {}
+
+            effective_audio_key = chapter_updates.get("audio_key", chapter_row.get("audio_key"))
+            effective_audio_url = (
+                _validate_content_url(data.audio_url)
+                if data.audio_url is not None
+                else _resolve_audio_url(effective_audio_key, existing_audio.get("audio_url"))
+            )
+            audio_status = (
+                data.status
+                or existing_audio.get("status")
+                or ("completed" if (data.has_audio is True or effective_audio_url or effective_audio_key) else "pending")
+            )
+            audio_provider = data.audio_provider or existing_audio.get("provider") or "kokoro"
+            audio_voice = data.audio_voice or existing_audio.get("voice") or "af_heart"
+            audio_duration = data.audio_duration if data.audio_duration is not None else existing_audio.get("duration")
+            audio_error = data.audio_error if data.audio_error is not None else existing_audio.get("error")
+            audio_progress = (
+                data.audio_progress
+                if data.audio_progress is not None
+                else (100.0 if audio_status == "completed" or data.has_audio is True else existing_audio.get("progress") or 0.0)
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO chapter_audio
+                    (novel_slug, chapter_number, provider, voice, status, audio_url, duration, error, progress, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (novel_slug, chapter_number)
+                DO UPDATE SET
+                    provider = excluded.provider,
+                    voice = excluded.voice,
+                    status = excluded.status,
+                    audio_url = excluded.audio_url,
+                    duration = excluded.duration,
+                    error = excluded.error,
+                    progress = excluded.progress,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    slug,
+                    chapter_number,
+                    audio_provider,
+                    audio_voice,
+                    audio_status,
+                    effective_audio_url,
+                    audio_duration,
+                    audio_error,
+                    audio_progress,
+                    datetime.utcnow(),
+                    datetime.utcnow(),
+                ),
+            )
+
+    updated_fields = set(chapter_updates.keys())
+    if audio_metadata_requested:
+        updated_fields.update(
+            {
+                "audio_url",
+                "audio_provider",
+                "audio_voice",
+                "audio_duration",
+                "audio_progress",
+                "audio_error",
+            }
+        )
+    return {"message": "Chapter storage metadata updated", "updated_fields": sorted(updated_fields)}
 
 
 @router.post("/metadata")
@@ -328,8 +541,8 @@ async def list_chapters(
         
         novel_id, data_path = novel['id'], novel['data_path']
         
-        # Sync chapters from filesystem
-        if data_path:
+        # Sync chapters from filesystem only for mutable local deployments.
+        if data_path and not READ_ONLY_MODE:
             sync_chapters_for_novel(novel_id, data_path)
         
         # Get chapters with audio metadata
@@ -363,31 +576,33 @@ async def get_chapter(chapter_id: int):
     """Get chapter content by ID"""
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM chapters WHERE id = ?', (chapter_id,))
+
+        cursor.execute(
+            '''
+            SELECT c.*, n.slug AS novel_slug
+            FROM chapters c
+            JOIN novels n ON n.id = c.novel_id
+            WHERE c.id = ?
+            ''',
+            (chapter_id,),
+        )
         chapter = dict_from_row(cursor.fetchone())
-        
+
         if not chapter:
             raise HTTPException(status_code=404, detail="Chapter not found")
-        
-        # FIXED: Read content from filesystem (preferred) or DB (legacy)
-        content = ""
-        
-        # Try content_path first (efficient)
-        if chapter.get('content_path') and os.path.exists(chapter['content_path']):
-            with open(chapter['content_path'], 'r', encoding='utf-8') as f:
-                content = f.read()
-                # Skip the title and separator lines
-                lines = content.split('\n')
-                if len(lines) > 2:
-                    content = '\n'.join(lines[2:]).strip()
-        # Fallback to DB content (legacy, causes bloat)
-        elif chapter.get('content'):
-            content = chapter['content']
-        else:
-            # No content available
-            content = ""
-        
+
+        content = await _resolve_chapter_content(chapter)
+
+        cursor.execute(
+            '''
+            SELECT status, audio_url
+            FROM chapter_audio
+            WHERE novel_slug = ? AND chapter_number = ?
+            ''',
+            (chapter['novel_slug'], chapter['chapter_number']),
+        )
+        audio_meta = dict_from_row(cursor.fetchone())
+
         # Get prev/next chapter numbers
         cursor.execute('''
             SELECT chapter_number FROM chapters 
@@ -404,6 +619,15 @@ async def get_chapter(chapter_id: int):
         ''', (chapter['novel_id'], chapter['chapter_number']))
         next_row = cursor.fetchone()
         next_chapter = next_row['chapter_number'] if next_row else None
+
+    audio_url = _resolve_audio_url(chapter.get('audio_key'), audio_meta.get('audio_url') if audio_meta else None)
+
+    has_audio = bool(
+        chapter.get('audio_key')
+        or chapter.get('audio_path')
+        or chapter.get('has_audio')
+        or (audio_meta and audio_meta.get('status') == 'completed')
+    )
     
     return ChapterContentResponse(
         id=chapter['id'],
@@ -411,7 +635,8 @@ async def get_chapter(chapter_id: int):
         chapter_number=chapter['chapter_number'],
         title=chapter['title'] or f"Chapter {chapter['chapter_number']}",
         content=content,
-        has_audio=bool(chapter.get('audio_path')),
+        has_audio=has_audio,
+        audio_url=audio_url,
         prev_chapter=prev_chapter,
         next_chapter=next_chapter
     )
@@ -441,32 +666,18 @@ async def get_chapter_by_number(slug: str, chapter_number: int):
         
         if not chapter:
             raise HTTPException(status_code=404, detail="Chapter not found")
-        
-        # Read content in order of preference:
-        # 1. R2 URL (content_url) - best for production
-        # 2. Local filesystem (content_path) - for dev
-        # 3. Database (content) - legacy fallback
-        content = ""
-        
-        if chapter.get('content_url'):
-            # Fetch from R2
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(chapter['content_url'], timeout=10)
-                    if resp.status_code == 200:
-                        content = resp.text
-            except Exception as e:
-                logger.warning(f"Failed to fetch from R2: {e}")
-        
-        if not content and chapter.get('content_path') and os.path.exists(chapter['content_path']):
-            with open(chapter['content_path'], 'r', encoding='utf-8') as f:
-                content = f.read()
-                lines = content.split('\n')
-                if len(lines) > 2:
-                    content = '\n'.join(lines[2:]).strip()
-        
-        if not content and chapter.get('content'):
-            content = chapter['content']
+
+        content = await _resolve_chapter_content(chapter)
+
+        cursor.execute(
+            '''
+            SELECT status, audio_url
+            FROM chapter_audio
+            WHERE novel_slug = ? AND chapter_number = ?
+            ''',
+            (slug, chapter_number),
+        )
+        audio_meta = dict_from_row(cursor.fetchone())
         
         # Get prev/next
         cursor.execute('''
@@ -484,6 +695,15 @@ async def get_chapter_by_number(slug: str, chapter_number: int):
         ''', (novel_id, chapter_number))
         next_row = cursor.fetchone()
         next_chapter = next_row['chapter_number'] if next_row else None
+
+    audio_url = _resolve_audio_url(chapter.get('audio_key'), audio_meta.get('audio_url') if audio_meta else None)
+
+    has_audio = bool(
+        chapter.get('audio_key')
+        or chapter.get('audio_path')
+        or chapter.get('has_audio')
+        or (audio_meta and audio_meta.get('status') == 'completed')
+    )
     
     return ChapterContentResponse(
         id=chapter['id'],
@@ -491,7 +711,8 @@ async def get_chapter_by_number(slug: str, chapter_number: int):
         chapter_number=chapter['chapter_number'],
         title=chapter['title'] or f"Chapter {chapter_number}",
         content=content,
-        has_audio=bool(chapter.get('audio_path')),
+        has_audio=has_audio,
+        audio_url=audio_url,
         prev_chapter=prev_chapter,
         next_chapter=next_chapter
     )

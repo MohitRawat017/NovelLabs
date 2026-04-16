@@ -13,6 +13,7 @@ import {
     uploadNovelVoiceProfile
 } from '../services/api';
 import { useScrapingJobs } from '../context/ScrapingContext';
+import { IS_READ_ONLY_MODE } from '../config/runtime';
 import { getSettings } from '../utils/readerSettings';
 import './NovelDetail.css';
 
@@ -96,6 +97,16 @@ function NovelDetail() {
     };
 
     const fetchVoiceProfile = async () => {
+        if (IS_READ_ONLY_MODE) {
+            setAudioHealth(null);
+            setVoiceProfile(null);
+            setVoiceRefText('');
+            setVoiceDisplayName('');
+            setVoiceMessage(null);
+            setVoiceProfileLoading(false);
+            return;
+        }
+
         try {
             setVoiceProfileLoading(true);
             const selectedProvider = getSettings().ttsProvider || 'kokoro';
@@ -477,42 +488,44 @@ function NovelDetail() {
                                 <BookOpen size={16} />
                                 Continue
                             </button>
-                            <div className="flex flex-col gap-2 flex-1 min-w-[280px] md:min-w-[360px] md:max-w-xl ml-auto md:ml-0">
-                                <div className="flex gap-3 flex-wrap">
-                                    <input
-                                        type="url"
-                                        value={sourceUrlInput}
-                                        onChange={(event) => setSourceUrlInput(event.target.value)}
-                                        placeholder="Paste the novel source URL for missing-chapter fetches"
-                                        className="flex-1 min-w-[220px] px-4 py-3 rounded-xl text-sm font-medium text-stone-800 dark:text-violet-100 bg-white/55 dark:bg-white/5 border border-stone-300/50 dark:border-white/10 shadow-sm backdrop-blur-sm focus:outline-none focus:ring-2 focus:ring-violet-500/30"
-                                    />
-                                    <button
-                                        className="px-5 py-3 rounded-xl text-stone-700 dark:text-violet-100 font-bold text-sm bg-white/50 dark:bg-white/5 hover:bg-white/80 dark:hover:bg-violet-500/20 border border-stone-300/50 dark:border-white/10 shadow-sm transition-all flex items-center gap-2 backdrop-blur-sm"
-                                        onClick={handleUpdate}
-                                        disabled={updating}
-                                    >
-                                        {updating ? (
-                                            <>
-                                                <Loader size={16} className="spin" />
-                                                Checking
-                                            </>
-                                        ) : (
-                                            <>
-                                                <RefreshCw size={16} />
-                                                Fetch Updates
-                                            </>
-                                        )}
-                                    </button>
+                            {!IS_READ_ONLY_MODE && (
+                                <div className="flex flex-col gap-2 flex-1 min-w-[280px] md:min-w-[360px] md:max-w-xl ml-auto md:ml-0">
+                                    <div className="flex gap-3 flex-wrap">
+                                        <input
+                                            type="url"
+                                            value={sourceUrlInput}
+                                            onChange={(event) => setSourceUrlInput(event.target.value)}
+                                            placeholder="Paste the novel source URL for missing-chapter fetches"
+                                            className="flex-1 min-w-[220px] px-4 py-3 rounded-xl text-sm font-medium text-stone-800 dark:text-violet-100 bg-white/55 dark:bg-white/5 border border-stone-300/50 dark:border-white/10 shadow-sm backdrop-blur-sm focus:outline-none focus:ring-2 focus:ring-violet-500/30"
+                                        />
+                                        <button
+                                            className="px-5 py-3 rounded-xl text-stone-700 dark:text-violet-100 font-bold text-sm bg-white/50 dark:bg-white/5 hover:bg-white/80 dark:hover:bg-violet-500/20 border border-stone-300/50 dark:border-white/10 shadow-sm transition-all flex items-center gap-2 backdrop-blur-sm"
+                                            onClick={handleUpdate}
+                                            disabled={updating}
+                                        >
+                                            {updating ? (
+                                                <>
+                                                    <Loader size={16} className="spin" />
+                                                    Checking
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <RefreshCw size={16} />
+                                                    Fetch Updates
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
+                                    <p className="text-xs text-stone-500 dark:text-stone-400 px-1">
+                                        {novel?.source_toc_url
+                                            ? 'This source URL is saved and will be reused for future missing-chapter fetches.'
+                                            : 'Older novels do not have a saved source URL yet. Paste it once here and the app will save it for later update fetches.'}
+                                    </p>
                                 </div>
-                                <p className="text-xs text-stone-500 dark:text-stone-400 px-1">
-                                    {novel?.source_toc_url
-                                        ? 'This source URL is saved and will be reused for future missing-chapter fetches.'
-                                        : 'Older novels do not have a saved source URL yet. Paste it once here and the app will save it for later update fetches.'}
-                                </p>
-                            </div>
+                            )}
                         </div>
 
-                        {updateMessage && (
+                        {!IS_READ_ONLY_MODE && updateMessage && (
                             <div className={`mt-4 p-3 rounded-xl glass-thin text-sm font-medium flex items-center gap-2 ${updateMessage.includes('Error') ? 'bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400'}`}>
                                 {updateMessage.includes('Error') ? null : <CheckCircle size={14} className="flex-shrink-0" />}
                                 <span>{updateMessage}</span>
@@ -522,7 +535,7 @@ function NovelDetail() {
                 </header>
 
                 {/* --- 2. Dynamic Session Interface (Provider Aware) --- */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-12">
+                {!IS_READ_ONLY_MODE && <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-12">
                     
                     {/* Voice Profile Card (Qwen Only) */}
                     {qwenMode && (
@@ -732,7 +745,7 @@ function NovelDetail() {
                             </div>
                         )}
                     </div>
-                </div>
+                </div>}
 
                 {/* --- 3. Chapter Grid & Explorer --- */}
                 <div className="glass rounded-[32px] p-6 md:p-8 border border-white/50 dark:border-white/10 shadow-lg relative min-h-[500px]">

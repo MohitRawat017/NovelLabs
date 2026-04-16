@@ -4,8 +4,9 @@ NovelLabs FastAPI backend.
 import os
 import logging
 from logging.handlers import RotatingFileHandler
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from dotenv import load_dotenv
@@ -105,14 +106,18 @@ _configure_logging()
 logger = logging.getLogger(__name__)
 logger.info("Starting NovelLabs API...")
 
-from .routes import novels, chapters, scraper, audio
+from .routes import novels, chapters
 from .database import init_db, close_connection_pool
 from .config import (
     ALLOWED_ORIGINS,
     AUDIO_DIR,
+    AUTO_INIT_DB_SCHEMA,
     AUTO_SYNC_NOVELS_ON_STARTUP,
     DATABASE_BACKEND,
+    ENABLE_SCRAPING,
+    ENABLE_TTS_GENERATION,
     LOCAL_DEV_ORIGIN_REGEX,
+    READ_ONLY_MODE,
 )
 
 logger.info("Imports completed successfully")
@@ -134,11 +139,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def read_only_guard(request: Request, call_next):
+    if (
+        READ_ONLY_MODE
+        and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path.startswith("/api/")
+    ):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "API is running in read-only mode. "
+                    "Write operations are disabled in this deployment."
+                )
+            },
+        )
+
+    return await call_next(request)
+
 # Include routers
 app.include_router(novels.router, prefix="/api/novels", tags=["novels"])
 app.include_router(chapters.router, prefix="/api/chapters", tags=["chapters"])
-app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
-app.include_router(audio.router, prefix="/api/audio", tags=["audio"])
+
+if ENABLE_SCRAPING and not READ_ONLY_MODE:
+    try:
+        from .routes import scraper
+
+        app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
+    except Exception as exc:
+        logger.warning("Scraper routes unavailable: %s", exc)
+else:
+    from .routes import scraper_disabled
+
+    app.include_router(scraper_disabled.router, prefix="/api/scraper", tags=["scraper"])
+    logger.info(
+        "Scraper routes running in disabled mode (enable_scraping=%s, read_only=%s)",
+        ENABLE_SCRAPING,
+        READ_ONLY_MODE,
+    )
+
+if ENABLE_TTS_GENERATION and not READ_ONLY_MODE:
+    try:
+        from .routes import audio
+
+        app.include_router(audio.router, prefix="/api/audio", tags=["audio"])
+    except Exception as exc:
+        logger.warning("Audio routes unavailable: %s", exc)
+else:
+    from .routes import audio_readonly
+
+    app.include_router(audio_readonly.router, prefix="/api/audio", tags=["audio"])
+    logger.info(
+        "Audio routes running in read-only mode (enable_tts_generation=%s, read_only=%s)",
+        ENABLE_TTS_GENERATION,
+        READ_ONLY_MODE,
+    )
 
 # Mount static files for covers and audio (only if directories exist)
 covers_dir = BASE_DIR / "web" / "public" / "covers"
@@ -155,38 +212,49 @@ async def startup_event():
     """Initialize database and sync local novels."""
     logger.info("Running startup event...")
     try:
-        logger.info("Initializing database...")
-        init_db()
-        logger.info("Database initialized successfully")
+        if AUTO_INIT_DB_SCHEMA:
+            logger.info("Initializing database schema...")
+            init_db()
+            logger.info("Database initialized successfully")
+        else:
+            logger.info("Skipping database schema initialization (AUTO_INIT_DB_SCHEMA=false)")
 
         # Reset any chapter_audio rows left stuck in 'generating' or 'paused' from a
         # previous server crash or restart. Without this, the frontend sees them as
         # forever-running or forever-paused with no background thread to service them.
-        try:
-            from .database import get_db
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE chapter_audio"
-                    " SET status = 'cancelled',"
-                    "     error  = NULL,"
-                    "     progress = 0,"
-                    "     updated_at = CURRENT_TIMESTAMP"
-                    " WHERE status IN ('generating', 'paused')"
-                    "    OR (status = 'failed' AND error = ?)"
-                    ,
-                    (audio.STALE_RESTART_AUDIO_ERROR,)
-                )
-                stale_count = cursor.rowcount
-            if stale_count:
-                logger.warning(
-                    "Reset %d stale audio job(s) to 'cancelled' on startup", stale_count
-                )
-        except Exception as reset_err:
-            logger.warning("Could not reset stale generating jobs on startup: %s", reset_err)
+        if not READ_ONLY_MODE and ENABLE_TTS_GENERATION:
+            try:
+                stale_restart_audio_error = "Server restarted while generation was in progress"
+                from .database import get_db
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE chapter_audio"
+                        " SET status = 'cancelled',"
+                        "     error  = NULL,"
+                        "     progress = 0,"
+                        "     updated_at = CURRENT_TIMESTAMP"
+                        " WHERE status IN ('generating', 'paused')"
+                        "    OR (status = 'failed' AND error = ?)"
+                        ,
+                        (stale_restart_audio_error,)
+                    )
+                    stale_count = cursor.rowcount
+                if stale_count:
+                    logger.warning(
+                        "Reset %d stale audio job(s) to 'cancelled' on startup", stale_count
+                    )
+            except Exception as reset_err:
+                logger.warning("Could not reset stale generating jobs on startup: %s", reset_err)
+        else:
+            logger.info(
+                "Skipping stale audio reset (read_only=%s, enable_tts_generation=%s)",
+                READ_ONLY_MODE,
+                ENABLE_TTS_GENERATION,
+            )
         
         # FIXED: Sync novels once on startup instead of on every request.
-        if AUTO_SYNC_NOVELS_ON_STARTUP:
+        if AUTO_SYNC_NOVELS_ON_STARTUP and not READ_ONLY_MODE:
             try:
                 logger.info("Syncing novels from filesystem...")
                 from .routes.novels import sync_novels_to_db
@@ -196,7 +264,11 @@ async def startup_event():
                 logger.error(f"Failed to sync novels on startup: {e}")
                 # Don't fail startup if sync fails
         else:
-            logger.info("Skipping filesystem sync on startup (AUTO_SYNC_NOVELS_ON_STARTUP=false)")
+            logger.info(
+                "Skipping filesystem sync on startup (auto_sync=%s, read_only=%s)",
+                AUTO_SYNC_NOVELS_ON_STARTUP,
+                READ_ONLY_MODE,
+            )
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         # Don't raise - allow app to start for health checks

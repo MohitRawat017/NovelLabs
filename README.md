@@ -203,19 +203,28 @@ If you hit a wall, check these specific issues we've verified during development
 
 ## Architecture
 
-NovelLabs is designed for local ownership.
+NovelLabs is local-first for ingestion/generation and deployment-ready for read serving.
 
-- **Local SQLite**: All progress, libraries, and settings are handled via `sqlite` in the `data/` folder.
-- **Local Audio Output**: Everything caches to `/audio/` and serves directly to the React frontend.
-- **Local Qwen Sidecar**: Keeps the main app lightweight by offloading heavy ML inference to a dedicated sibling API.
+- **Production backend**: `src/api/` (FastAPI routes, storage, DB access)
+- **Frontend**: `web/` (Vite + React)
+- **Local pipeline**: `src/SCRAPER/`, `src/scraper.py`, `src/segmenter.py`
+- **Generated outputs**: `data/output/`, `audio/`, `logs/`
+
+For a full keep/archive/cleanup map, see [docs/REPO_STRUCTURE.md](docs/REPO_STRUCTURE.md).
 
 ```text
 NovelLabs/
-├── audio/              Generated WAV files and timing JSON
-├── data/               SQLite database and output text files
-├── docs/screenshots/   Project demonstration images
-├── src/api/            FastAPI backend, TTS routing, segmenter
-└── web/                React frontend (Vite)
+├── src/
+│   ├── api/            FastAPI backend (production + local)
+│   ├── SCRAPER/        Active scraper package
+│   ├── scraper.py      Local CLI scrape flow
+│   └── segmenter.py    Local CLI segmentation flow
+├── web/                React frontend (Vite)
+├── scripts/            Operational scripts
+├── data/               SQLite + scraped chapter outputs
+├── audio/              Generated chapter audio and timing files
+├── logs/               Runtime logs
+└── docs/               Structure and operational documentation
 ```
 
 ---

@@ -10,6 +10,7 @@ from datetime import datetime
 # Novel schemas
 class NovelBase(BaseModel):
     title: str
+    author: Optional[str] = None
     description: Optional[str] = None
     cover_url: Optional[str] = None
     genres: Optional[str] = None  # Comma-separated genres
@@ -72,6 +73,7 @@ class ChapterContentResponse(BaseModel):
     title: str
     content: str
     has_audio: bool
+    audio_url: Optional[str] = None
     prev_chapter: Optional[int]
     next_chapter: Optional[int]
 

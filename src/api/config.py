@@ -113,13 +113,35 @@ if DATABASE_BACKEND == "sqlite" and _configured_audio_storage_backend != "local"
     logger.info("Ignoring AUDIO_STORAGE_BACKEND=%s because SQLite mode is local-only", _configured_audio_storage_backend)
 AUDIO_DIR = os.getenv("AUDIO_DIR", str(BASE_DIR / "audio"))
 
-# ==================== R2 Audio Storage (optional in local mode) ====================
+# ==================== R2 Storage ====================
 
-R2_AUDIO_ACCOUNT_ID = os.getenv("R2_AUDIO_ACCOUNT_ID", "")
-R2_AUDIO_ACCESS_KEY_ID = os.getenv("R2_AUDIO_ACCESS_KEY_ID", "")
-R2_AUDIO_SECRET_ACCESS_KEY = os.getenv("R2_AUDIO_SECRET_ACCESS_KEY", "")
-R2_AUDIO_BUCKET_NAME = os.getenv("R2_AUDIO_BUCKET_NAME", "novellabs-audio")
-R2_AUDIO_PUBLIC_URL = os.getenv("R2_AUDIO_PUBLIC_URL", "")
+# Deprecated single-bucket variables are kept only as compatibility fallbacks.
+LEGACY_R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "").strip()
+LEGACY_R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY", "").strip()
+LEGACY_R2_SECRET_KEY = os.getenv("R2_SECRET_KEY", "").strip()
+LEGACY_R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "").strip()
+LEGACY_R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL", "").strip()
+
+# Primary chapter-text bucket configuration.
+R2_NOVEL_ACCOUNT_ID = os.getenv("R2_NOVEL_ACCOUNT_ID", LEGACY_R2_ACCOUNT_ID).strip()
+R2_NOVEL_ACCESS_KEY_ID = os.getenv("R2_NOVEL_ACCESS_KEY_ID", LEGACY_R2_ACCESS_KEY).strip()
+R2_NOVEL_SECRET_ACCESS_KEY = os.getenv("R2_NOVEL_SECRET_ACCESS_KEY", LEGACY_R2_SECRET_KEY).strip()
+R2_NOVEL_BUCKET_NAME = os.getenv("R2_NOVEL_BUCKET_NAME", LEGACY_R2_BUCKET_NAME).strip()
+R2_NOVEL_PUBLIC_URL = os.getenv("R2_NOVEL_PUBLIC_URL", LEGACY_R2_PUBLIC_URL).strip()
+
+# Primary audio bucket configuration.
+R2_AUDIO_ACCOUNT_ID = os.getenv("R2_AUDIO_ACCOUNT_ID", LEGACY_R2_ACCOUNT_ID).strip()
+R2_AUDIO_ACCESS_KEY_ID = os.getenv("R2_AUDIO_ACCESS_KEY_ID", LEGACY_R2_ACCESS_KEY).strip()
+R2_AUDIO_SECRET_ACCESS_KEY = os.getenv("R2_AUDIO_SECRET_ACCESS_KEY", LEGACY_R2_SECRET_KEY).strip()
+R2_AUDIO_BUCKET_NAME = os.getenv("R2_AUDIO_BUCKET_NAME", LEGACY_R2_BUCKET_NAME).strip()
+R2_AUDIO_PUBLIC_URL = os.getenv("R2_AUDIO_PUBLIC_URL", LEGACY_R2_PUBLIC_URL).strip()
+
+# Generic aliases remain available for older codepaths, preferring chapter storage.
+R2_ACCOUNT_ID = LEGACY_R2_ACCOUNT_ID or R2_NOVEL_ACCOUNT_ID or R2_AUDIO_ACCOUNT_ID
+R2_ACCESS_KEY = LEGACY_R2_ACCESS_KEY or R2_NOVEL_ACCESS_KEY_ID or R2_AUDIO_ACCESS_KEY_ID
+R2_SECRET_KEY = LEGACY_R2_SECRET_KEY or R2_NOVEL_SECRET_ACCESS_KEY or R2_AUDIO_SECRET_ACCESS_KEY
+R2_BUCKET_NAME = LEGACY_R2_BUCKET_NAME or R2_NOVEL_BUCKET_NAME or R2_AUDIO_BUCKET_NAME
+R2_PUBLIC_URL = LEGACY_R2_PUBLIC_URL or R2_NOVEL_PUBLIC_URL or R2_AUDIO_PUBLIC_URL
 
 # ==================== CORS ====================
 
@@ -153,6 +175,18 @@ else:
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 AUTO_SYNC_NOVELS_ON_STARTUP = _get_bool_env("AUTO_SYNC_NOVELS_ON_STARTUP", True)
 
-# ==================== Scraper ====================
+# ==================== Runtime Safety ====================
 
-SCRAPER_ENABLED = _get_bool_env("SCRAPER_ENABLED", False)
+# Read-only mode must be explicit so local PostgreSQL ingestion stays writable.
+READ_ONLY_MODE = _get_bool_env("READ_ONLY_MODE", False)
+
+# In read-only production mode, schema should be managed externally (migrations/SQL).
+AUTO_INIT_DB_SCHEMA = _get_bool_env("AUTO_INIT_DB_SCHEMA", not READ_ONLY_MODE)
+
+# Keep legacy SCRAPER_ENABLED while supporting new ENABLE_SCRAPING naming.
+_legacy_scraper_enabled = _get_bool_env("SCRAPER_ENABLED", False)
+ENABLE_SCRAPING = _get_bool_env("ENABLE_SCRAPING", _legacy_scraper_enabled)
+SCRAPER_ENABLED = ENABLE_SCRAPING
+
+# Prevent any model-loading or generation paths in production/read-only mode unless explicitly enabled.
+ENABLE_TTS_GENERATION = _get_bool_env("ENABLE_TTS_GENERATION", not READ_ONLY_MODE)

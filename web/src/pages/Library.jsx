@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { BookOpen, Filter, FolderUp, RefreshCw, Search } from 'lucide-react';
+import { IS_READ_ONLY_MODE } from '../config/runtime';
 import { getNovels, importNovelFolder } from '../services/api';
 import './Library.css';
 
@@ -109,7 +110,7 @@ function Library() {
                         Novel Library
                     </h1>
                     <p className="text-stone-700 dark:text-violet-200/80 text-lg font-medium dark:font-normal">
-                        Browse your collection of scraped and locally imported novels
+                        {IS_READ_ONLY_MODE ? 'Browse the novels that are currently available in this library' : 'Browse your collection of scraped and locally imported novels'}
                     </p>
                     {(importMessage || importError) && (
                         <div className={`mt-4 px-4 py-3 rounded-2xl glass-thin border ${importError ? 'border-red-500/30 text-red-600 dark:text-red-400 bg-red-500/10' : 'border-green-500/30 text-green-700 dark:text-green-300 bg-green-500/10'} text-sm font-medium`}>
@@ -154,18 +155,22 @@ function Library() {
 
                     {/* Actions (Right side) */}
                     <div className="flex items-center gap-3 w-full md:w-auto justify-end flex-shrink-0">
-                        <input
-                            ref={importInputRef}
-                            type="file"
-                            multiple
-                            accept=".txt,text/plain"
-                            className="hidden-folder-input"
-                            onChange={handleFolderImport}
-                        />
-                        <button onClick={handleImportClick} disabled={importing} className="glass-thin px-4 py-2 rounded-full text-xs font-bold text-stone-700 dark:text-violet-100 border border-stone-300/50 dark:border-violet-500/30 hover:bg-white/60 dark:hover:bg-violet-500/30 transition-all flex items-center gap-2 shadow-sm">
-                            <FolderUp size={14} className={importing ? 'spin text-violet-500' : 'text-stone-500 dark:text-violet-400'} />
-                            {importing ? 'Importing...' : 'Import'}
-                        </button>
+                        {!IS_READ_ONLY_MODE && (
+                            <>
+                                <input
+                                    ref={importInputRef}
+                                    type="file"
+                                    multiple
+                                    accept=".txt,text/plain"
+                                    className="hidden-folder-input"
+                                    onChange={handleFolderImport}
+                                />
+                                <button onClick={handleImportClick} disabled={importing} className="glass-thin px-4 py-2 rounded-full text-xs font-bold text-stone-700 dark:text-violet-100 border border-stone-300/50 dark:border-violet-500/30 hover:bg-white/60 dark:hover:bg-violet-500/30 transition-all flex items-center gap-2 shadow-sm">
+                                    <FolderUp size={14} className={importing ? 'spin text-violet-500' : 'text-stone-500 dark:text-violet-400'} />
+                                    {importing ? 'Importing...' : 'Import'}
+                                </button>
+                            </>
+                        )}
                         <button onClick={fetchNovels} disabled={loading || importing} className="glass-thin px-4 py-2 rounded-full text-xs font-bold text-stone-700 dark:text-violet-100 border border-stone-300/50 dark:border-violet-500/30 hover:bg-white/60 dark:hover:bg-violet-500/30 transition-all flex items-center gap-2 shadow-sm">
                             <RefreshCw size={14} className={loading ? 'spin text-violet-500' : 'text-stone-500 dark:text-violet-400'} />
                             Refresh
@@ -245,16 +250,18 @@ function Library() {
                                 </div>
                                 <h3 className="text-xl font-bold text-stone-800 dark:text-white">No novels found</h3>
                                 <p className="text-stone-600 dark:text-violet-200/70 max-w-sm mb-4 font-medium">
-                                    Import a local folder or scrape a new novel from the web to start building your library.
+                                    {IS_READ_ONLY_MODE ? 'This reader-only deployment only shows chapters and audio that have already been uploaded.' : 'Import a local folder or scrape a new novel from the web to start building your library.'}
                                 </p>
-                                <div className="flex flex-wrap items-center justify-center gap-3">
-                                    <button onClick={handleImportClick} className="px-6 py-2.5 rounded-full text-white font-medium flex items-center gap-2 bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-400 hover:to-indigo-400 dark:from-violet-600 dark:to-violet-600 dark:hover:from-violet-500 dark:hover:to-violet-500 shadow-sm transition-all text-sm">
-                                        <FolderUp size={16} /> Import Folder
-                                    </button>
-                                    <Link to="/scraper" className="px-6 py-2.5 rounded-full font-medium flex items-center gap-2 border border-stone-400/40 dark:border-violet-500/30 text-stone-700 dark:text-violet-200 hover:bg-white/60 dark:hover:bg-violet-500/10 hover:border-stone-400 dark:hover:border-violet-400/50 transform bg-white/40 dark:bg-transparent transition-all backdrop-blur-sm text-sm">
-                                        Scrape a Novel
-                                    </Link>
-                                </div>
+                                {!IS_READ_ONLY_MODE && (
+                                    <div className="flex flex-wrap items-center justify-center gap-3">
+                                        <button onClick={handleImportClick} className="px-6 py-2.5 rounded-full text-white font-medium flex items-center gap-2 bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-400 hover:to-indigo-400 dark:from-violet-600 dark:to-violet-600 dark:hover:from-violet-500 dark:hover:to-violet-500 shadow-sm transition-all text-sm">
+                                            <FolderUp size={16} /> Import Folder
+                                        </button>
+                                        <Link to="/scraper" className="px-6 py-2.5 rounded-full font-medium flex items-center gap-2 border border-stone-400/40 dark:border-violet-500/30 text-stone-700 dark:text-violet-200 hover:bg-white/60 dark:hover:bg-violet-500/10 hover:border-stone-400 dark:hover:border-violet-400/50 transform bg-white/40 dark:bg-transparent transition-all backdrop-blur-sm text-sm">
+                                            Scrape a Novel
+                                        </Link>
+                                    </div>
+                                )}
                             </div>
                         )}
 

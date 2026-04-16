@@ -15,6 +15,7 @@ from ..config import (
     AUTO_SYNC_NOVELS_ON_STARTUP,
     DATABASE_BACKEND,
     NOVEL_OUTPUT_DIR,
+    READ_ONLY_MODE,
     SQLITE_DB_PATH,
 )
 from ..models.schemas import NovelResponse, NovelListResponse, NovelCreate, NovelUpdateRequest
@@ -274,12 +275,19 @@ def sync_novels_to_db():
             else:
                 # Insert new novel
                 cursor.execute('''
-                    INSERT INTO novels (slug, title, description, genres, chapter_count, data_path, source_toc_url, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (novel['slug'], novel['title'], novel['description'],
-                      novel['genres'], novel['chapter_count'], novel['data_path'],
-                      novel.get('source_toc_url'),
-                      novel['last_updated']))
+                    INSERT INTO novels (slug, title, author, description, genres, chapter_count, data_path, source_toc_url, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    novel['slug'],
+                    novel['title'],
+                    novel.get('author'),
+                    novel['description'],
+                    novel['genres'],
+                    novel['chapter_count'],
+                    novel['data_path'],
+                    novel.get('source_toc_url'),
+                    novel['last_updated'],
+                ))
     
     return len(novels)
 
@@ -288,6 +296,7 @@ def upsert_novel_record(
     *,
     slug: str,
     title: str,
+    author: Optional[str],
     description: Optional[str],
     genres: Optional[str],
     data_path: str,
@@ -306,7 +315,7 @@ def upsert_novel_record(
             cursor.execute(
                 """
                 UPDATE novels
-                SET title = ?, description = ?, cover_url = ?, genres = ?,
+                SET title = ?, author = ?, description = ?, cover_url = ?, genres = ?,
                     chapter_count = COALESCE(?, chapter_count),
                     data_path = ?, source_toc_url = COALESCE(?, source_toc_url),
                     last_updated = ?
@@ -314,6 +323,7 @@ def upsert_novel_record(
                 """,
                 (
                     title,
+                    author,
                     description,
                     cover_url,
                     genres,
@@ -328,12 +338,13 @@ def upsert_novel_record(
             cursor.execute(
                 """
                 INSERT INTO novels
-                    (slug, title, description, cover_url, genres, chapter_count, data_path, source_toc_url, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (slug, title, author, description, cover_url, genres, chapter_count, data_path, source_toc_url, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     slug,
                     title,
+                    author,
                     description,
                     cover_url,
                     genres,
@@ -460,8 +471,9 @@ async def get_novel(slug: str):
         if not novel:
             raise HTTPException(status_code=404, detail="Novel not found")
         
-        # Increment views
-        cursor.execute('UPDATE novels SET views = views + 1 WHERE slug = ?', (slug,))
+        # Increment views only in mutable/local mode.
+        if not READ_ONLY_MODE:
+            cursor.execute('UPDATE novels SET views = views + 1 WHERE slug = ?', (slug,))
     
     return novel
 
@@ -480,10 +492,19 @@ async def create_novel(novel: NovelCreate):
             raise HTTPException(status_code=409, detail="Novel already exists")
         
         cursor.execute('''
-            INSERT INTO novels (slug, title, description, cover_url, genres, chapter_count, data_path, source_toc_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (novel.slug, novel.title, novel.description, novel.cover_url, 
-              novel.genres, 0, novel.data_path, novel.source_toc_url))
+            INSERT INTO novels (slug, title, author, description, cover_url, genres, chapter_count, data_path, source_toc_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            novel.slug,
+            novel.title,
+            novel.author,
+            novel.description,
+            novel.cover_url,
+            novel.genres,
+            0,
+            novel.data_path,
+            novel.source_toc_url,
+        ))
         
         conn.commit()
         
@@ -587,6 +608,7 @@ async def import_novel_folder(
     novel_record = upsert_novel_record(
         slug=novel_slug,
         title=novel_title,
+        author=None,
         description=f"Imported locally from folder '{safe_folder_name}'",
         genres="Imported,Local",
         data_path=str(target_dir),

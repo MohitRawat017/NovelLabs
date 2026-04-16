@@ -110,6 +110,7 @@ def _persist_scraped_output(
     novel_record = upsert_novel_record(
         slug=slugify(folder_name),
         title=detail["title"] or folder_name,
+        author=detail.get("author"),
         description=detail.get("description"),
         genres=_normalize_genres(detail.get("genres")),
         data_path=str(output_dir),

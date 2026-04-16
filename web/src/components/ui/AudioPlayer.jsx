@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Play, Pause, Volume2, VolumeX, X, Loader, ChevronUp, ChevronDown, StopCircle } from 'lucide-react';
 import { getAudioStatus, generateChapterAudio, getAudioStreamUrl } from '../../services/api';
 import { useScrapingJobs } from '../../context/ScrapingContext';
+import { IS_READ_ONLY_MODE } from '../../config/runtime';
 import './AudioPlayer.css';
 
 function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose, onTimeUpdate, onSpeedChange, onAudioReady }) {
@@ -178,6 +179,11 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
     };
 
     const startAudioGeneration = async ({ force = false } = {}) => {
+        if (IS_READ_ONLY_MODE) {
+            setIsLoading(false);
+            return;
+        }
+
         setIsLoading(true);
         setError(null);
         setGenerationStatus('Starting TTS generation...');
@@ -503,10 +509,12 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                     </div>
                 ) : !audioReady ? (
                     <div className="flex flex-col items-center justify-center py-6 gap-4">
-                        <span className="text-sm font-medium text-stone-600 dark:text-stone-400">Audio not generated yet</span>
-                        <button className="px-6 py-2.5 rounded-xl text-white font-bold text-sm bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-400 hover:to-indigo-400 shadow-md transition-all" onClick={startAudioGeneration}>
-                            Generate Now
-                        </button>
+                        <span className="text-sm font-medium text-stone-600 dark:text-stone-400">{IS_READ_ONLY_MODE ? 'Audio not available yet' : 'Audio not generated yet'}</span>
+                        {!IS_READ_ONLY_MODE && (
+                            <button className="px-6 py-2.5 rounded-xl text-white font-bold text-sm bg-gradient-to-r from-violet-500 to-indigo-500 hover:from-violet-400 hover:to-indigo-400 shadow-md transition-all" onClick={startAudioGeneration}>
+                                Generate Now
+                            </button>
+                        )}
                     </div>
                 ) : (
                     <>

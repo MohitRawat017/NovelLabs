@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { ScrapingProvider } from './context/ScrapingContext';
 import { ThemeProvider } from './context/ThemeContext';
 import Navbar from './components/ui/Navbar';
@@ -7,6 +7,7 @@ import Library from './pages/Library';
 import NovelDetail from './pages/NovelDetail';
 import ChapterReader from './pages/ChapterReader';
 import Scraper from './pages/Scraper';
+import { IS_READ_ONLY_MODE } from './config/runtime';
 import './index.css';
 
 function App() {
@@ -24,7 +25,7 @@ function App() {
                 <Route path="/library" element={<Library />} />
                 <Route path="/novel/:slug" element={<NovelDetail />} />
                 <Route path="/novel/:slug/chapter/:chapterId" element={<ChapterReader />} />
-                <Route path="/scraper" element={<Scraper />} />
+                <Route path="/scraper" element={IS_READ_ONLY_MODE ? <Navigate to="/library" replace /> : <Scraper />} />
               </Routes>
             </main>
           </div>

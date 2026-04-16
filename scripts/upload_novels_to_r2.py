@@ -5,11 +5,12 @@ Uploads chapter content (.txt files) from data/output/ to R2 bucket.
 The API will then read content from R2 URLs instead of local filesystem.
 
 Environment Variables Required:
-- R2_NOVEL_ACCOUNT_ID
-- R2_NOVEL_ACCESS_KEY_ID  
-- R2_NOVEL_SECRET_ACCESS_KEY
-- R2_NOVEL_BUCKET_NAME
-- R2_NOVEL_PUBLIC_URL (optional, for custom domain)
+- API_URL (defaults to the writable local backend: http://localhost:8001/api)
+- R2_NOVEL_ACCOUNT_ID (or legacy R2_ACCOUNT_ID)
+- R2_NOVEL_ACCESS_KEY_ID (or legacy R2_ACCESS_KEY)
+- R2_NOVEL_SECRET_ACCESS_KEY (or legacy R2_SECRET_KEY)
+- R2_NOVEL_BUCKET_NAME (or legacy R2_BUCKET_NAME)
+- R2_NOVEL_PUBLIC_URL (optional, or legacy R2_PUBLIC_URL)
 
 Usage:
     python scripts/upload_novels_to_r2.py
@@ -24,20 +25,23 @@ from typing import Optional
 
 import boto3
 from botocore.config import Config
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 # ==================== R2 Configuration ====================
 
-R2_NOVEL_ACCOUNT_ID = os.getenv("R2_NOVEL_ACCOUNT_ID", "")
-R2_NOVEL_ACCESS_KEY_ID = os.getenv("R2_NOVEL_ACCESS_KEY_ID", "")
-R2_NOVEL_SECRET_ACCESS_KEY = os.getenv("R2_NOVEL_SECRET_ACCESS_KEY", "")
-R2_NOVEL_BUCKET_NAME = os.getenv("R2_NOVEL_BUCKET_NAME", "")
-R2_NOVEL_PUBLIC_URL = os.getenv("R2_NOVEL_PUBLIC_URL", "")
+R2_NOVEL_ACCOUNT_ID = os.getenv("R2_NOVEL_ACCOUNT_ID") or os.getenv("R2_ACCOUNT_ID", "")
+R2_NOVEL_ACCESS_KEY_ID = os.getenv("R2_NOVEL_ACCESS_KEY_ID") or os.getenv("R2_ACCESS_KEY", "")
+R2_NOVEL_SECRET_ACCESS_KEY = os.getenv("R2_NOVEL_SECRET_ACCESS_KEY") or os.getenv("R2_SECRET_KEY", "")
+R2_NOVEL_BUCKET_NAME = os.getenv("R2_NOVEL_BUCKET_NAME") or os.getenv("R2_BUCKET_NAME", "")
+R2_NOVEL_PUBLIC_URL = os.getenv("R2_NOVEL_PUBLIC_URL") or os.getenv("R2_PUBLIC_URL", "")
 
 R2_ENDPOINT = f"https://{R2_NOVEL_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_NOVEL_ACCOUNT_ID else ""
 
 # ==================== API Configuration ====================
 
-API_URL = os.getenv("API_URL", "https://novellabs.onrender.com/api")
+API_URL = os.getenv("API_URL", "http://localhost:8001/api")
 DATA_DIR = Path(__file__).parent.parent / "data" / "output"
 
 # ==================== S3 Client ====================
@@ -81,7 +85,7 @@ def check_chapter_exists_in_r2(novel_slug: str, chapter_number: int) -> bool:
     if not client:
         return False
     
-    key = f"novels/{novel_slug}/chapter_{chapter_number:04d}.txt"
+    key = f"novels/{novel_slug}/chapters/{chapter_number:04d}.txt"
     
     try:
         client.head_object(Bucket=R2_NOVEL_BUCKET_NAME, Key=key)
@@ -103,7 +107,7 @@ def get_existing_chapters_in_r2(novel_slug: str) -> set:
         return set()
     
     existing = set()
-    prefix = f"novels/{novel_slug}/"
+    prefix = f"novels/{novel_slug}/chapters/"
     
     try:
         paginator = client.get_paginator('list_objects_v2')
@@ -112,8 +116,7 @@ def get_existing_chapters_in_r2(novel_slug: str) -> set:
         for page in pages:
             if 'Contents' in page:
                 for obj in page['Contents']:
-                    # Extract chapter number from key like "novels/slug/chapter_0001.txt"
-                    match = re.search(r'chapter_(\d+)\.txt$', obj['Key'])
+                    match = re.search(r'chapters/(\d+)\.txt$', obj['Key'])
                     if match:
                         existing.add(int(match.group(1)))
     except Exception as e:
@@ -122,18 +125,18 @@ def get_existing_chapters_in_r2(novel_slug: str) -> set:
     return existing
 
 
-def upload_chapter_to_r2(content: str, novel_slug: str, chapter_number: int) -> Optional[str]:
+def upload_chapter_to_r2(content: str, novel_slug: str, chapter_number: int) -> Optional[dict]:
     """
-    Upload chapter content to R2 and return the public URL.
+    Upload chapter content to R2 and return storage metadata.
     
-    File path in R2: novels/{novel_slug}/chapter_{chapter_number:04d}.txt
+    File path in R2: novels/{novel_slug}/chapters/{chapter_number:04d}.txt
     """
     client = get_s3_client()
     if not client:
         return None
     
     # Create key (path in bucket)
-    key = f"novels/{novel_slug}/chapter_{chapter_number:04d}.txt"
+    key = f"novels/{novel_slug}/chapters/{chapter_number:04d}.txt"
     
     try:
         client.put_object(
@@ -143,12 +146,17 @@ def upload_chapter_to_r2(content: str, novel_slug: str, chapter_number: int) -> 
             ContentType='text/plain; charset=utf-8'
         )
         
-        # Return public URL
+        # Return public URL + canonical key
         if R2_NOVEL_PUBLIC_URL:
-            return f"{R2_NOVEL_PUBLIC_URL}/{key}"
+            url = f"{R2_NOVEL_PUBLIC_URL.rstrip('/')}/{key}"
         else:
             # Default R2 public URL format (if bucket is public)
-            return f"https://{R2_NOVEL_BUCKET_NAME}.{R2_NOVEL_ACCOUNT_ID}.r2.dev/{key}"
+            url = f"https://{R2_NOVEL_BUCKET_NAME}.{R2_NOVEL_ACCOUNT_ID}.r2.dev/{key}"
+
+        return {
+            "r2_key": key,
+            "content_url": url,
+        }
     
     except Exception as e:
         print(f"[ERROR] Failed to upload {key}: {e}")
@@ -203,13 +211,9 @@ def read_chapter_content(filepath: Path) -> tuple[str, str, int]:
     return title, content, word_count
 
 
-def update_chapter_content_url(client: httpx.Client, novel_slug: str, chapter_number: int, content_url: str):
-    """Update chapter in database with R2 content URL"""
-    # This endpoint needs to be created in the API
-    payload = {
-        "content_url": content_url
-    }
-    
+def _update_chapter_content_url_legacy(client: httpx.Client, novel_slug: str, chapter_number: int, content_url: str) -> bool:
+    payload = {"content_url": content_url}
+
     try:
         response = client.patch(
             f"{API_URL}/chapters/novel/{novel_slug}/{chapter_number}/content-url",
@@ -220,6 +224,42 @@ def update_chapter_content_url(client: httpx.Client, novel_slug: str, chapter_nu
     except Exception as e:
         print(f"[ERROR] Failed to update chapter URL: {e}")
         return False
+
+
+def update_chapter_storage_metadata(client: httpx.Client, novel_slug: str, chapter_number: int, storage: dict) -> bool:
+    """Update chapter in database with canonical R2 key + compatibility URL."""
+    payload = {
+        "r2_key": storage["r2_key"],
+        "content_url": storage["content_url"],
+    }
+
+    try:
+        response = client.patch(
+            f"{API_URL}/chapters/novel/{novel_slug}/{chapter_number}/storage",
+            json=payload,
+            timeout=30,
+        )
+        if response.status_code == 200:
+            return True
+
+        print(
+            f"[WARN] New storage endpoint failed for chapter {chapter_number} "
+            f"(status={response.status_code}). Falling back to legacy content-url update."
+        )
+        return _update_chapter_content_url_legacy(
+            client,
+            novel_slug,
+            chapter_number,
+            storage["content_url"],
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to call storage endpoint: {e}. Falling back to legacy endpoint.")
+        return _update_chapter_content_url_legacy(
+            client,
+            novel_slug,
+            chapter_number,
+            storage["content_url"],
+        )
 
 
 def upload_novel_to_r2(novel: dict, http_client: httpx.Client, limit: Optional[int] = None):
@@ -262,14 +302,14 @@ def upload_novel_to_r2(novel: dict, http_client: httpx.Client, limit: Optional[i
         total_bytes += len(content.encode('utf-8'))
         
         # Upload to R2
-        content_url = upload_chapter_to_r2(content, novel['slug'], chapter_number)
+        storage = upload_chapter_to_r2(content, novel['slug'], chapter_number)
         
-        if content_url:
-            # Update database with the URL
-            if update_chapter_content_url(http_client, novel['slug'], chapter_number, content_url):
+        if storage:
+            # Update database with canonical key metadata.
+            if update_chapter_storage_metadata(http_client, novel['slug'], chapter_number, storage):
                 success += 1
             else:
-                # URL uploaded but DB update failed - still count as partial success
+                # Object uploaded but DB update failed - still count as partial success
                 success += 1
                 print(f"[WARN] R2 OK but DB update failed for chapter {chapter_number}")
         else:
@@ -298,6 +338,7 @@ def main():
     s3 = get_s3_client()
     if not s3:
         print("\n[SETUP] Please set these environment variables:")
+        print("  API_URL=http://localhost:8001/api")
         print("  R2_NOVEL_ACCOUNT_ID=<your cloudflare account id>")
         print("  R2_NOVEL_ACCESS_KEY_ID=<your R2 access key>")
         print("  R2_NOVEL_SECRET_ACCESS_KEY=<your R2 secret key>")
@@ -338,7 +379,7 @@ def main():
     print("\n" + "=" * 60)
     print("UPLOAD COMPLETE")
     print("=" * 60)
-    print("\n[NEXT] Update your API to read from content_url instead of content_path")
+    print("\n[NEXT] Backend can now read from canonical r2_key metadata with content_url fallback")
 
 
 if __name__ == "__main__":

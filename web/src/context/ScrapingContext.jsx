@@ -11,6 +11,7 @@ import {
     resumeAudioJob,
     cancelAudioJob,
 } from '../services/api';
+import { IS_READ_ONLY_MODE } from '../config/runtime';
 
 const ScrapingContext = createContext();
 const SCRAPER_ACTIVE_STATUSES = new Set(['pending', 'running', 'detecting', 'paused']);
@@ -32,6 +33,10 @@ export function ScrapingProvider({ children }) {
     const audioPollIntervalRef = useRef(null);
 
     const refreshScraperJobs = useCallback(async () => {
+        if (IS_READ_ONLY_MODE) {
+            setJobs({});
+            return;
+        }
         try {
             const serverJobs = await listScrapeJobs();
             setJobs(serverJobs);
@@ -41,6 +46,10 @@ export function ScrapingProvider({ children }) {
     }, []);
 
     const refreshAudioJobs = useCallback(async (novelSlug) => {
+        if (IS_READ_ONLY_MODE) {
+            setAudioJobs([]);
+            return;
+        }
         try {
             const payload = await listAudioJobs(novelSlug);
             setAudioJobs(Array.isArray(payload?.jobs) ? payload.jobs : []);
@@ -59,6 +68,9 @@ export function ScrapingProvider({ children }) {
 
     // Cancel a running job
     const cancelJob = useCallback(async (jobId) => {
+        if (IS_READ_ONLY_MODE) {
+            return;
+        }
         try {
             await cancelScrapeJob(jobId);
             setJobs(prev => ({
@@ -71,6 +83,9 @@ export function ScrapingProvider({ children }) {
     }, []);
 
     const pauseJob = useCallback(async (jobId) => {
+        if (IS_READ_ONLY_MODE) {
+            return;
+        }
         try {
             await pauseScrapeJob(jobId);
             setJobs(prev => ({
@@ -83,6 +98,9 @@ export function ScrapingProvider({ children }) {
     }, []);
 
     const resumeJob = useCallback(async (jobId) => {
+        if (IS_READ_ONLY_MODE) {
+            return;
+        }
         try {
             await resumeScrapeJob(jobId);
             setJobs(prev => ({
@@ -95,6 +113,9 @@ export function ScrapingProvider({ children }) {
     }, []);
 
     const pauseAudioGeneration = useCallback(async (novelSlug, chapterNumber) => {
+        if (IS_READ_ONLY_MODE) {
+            return;
+        }
         try {
             await pauseAudioJob(novelSlug, chapterNumber);
             setAudioJobs(prev => prev.map(job => (
@@ -108,6 +129,9 @@ export function ScrapingProvider({ children }) {
     }, []);
 
     const resumeAudioGeneration = useCallback(async (novelSlug, chapterNumber) => {
+        if (IS_READ_ONLY_MODE) {
+            return;
+        }
         try {
             await resumeAudioJob(novelSlug, chapterNumber);
             setAudioJobs(prev => prev.map(job => (
@@ -121,6 +145,9 @@ export function ScrapingProvider({ children }) {
     }, []);
 
     const cancelAudioGeneration = useCallback(async (novelSlug, chapterNumber) => {
+        if (IS_READ_ONLY_MODE) {
+            return;
+        }
         try {
             await cancelAudioJob(novelSlug, chapterNumber);
             setAudioJobs(prev => prev.map(job => (
@@ -135,6 +162,14 @@ export function ScrapingProvider({ children }) {
 
     // Remove a job from tracking (and from server)
     const removeJob = useCallback(async (jobId) => {
+        if (IS_READ_ONLY_MODE) {
+            setJobs(prev => {
+                const newJobs = { ...prev };
+                delete newJobs[jobId];
+                return newJobs;
+            });
+            return;
+        }
         try {
             await removeScrapeJob(jobId);
         } catch (err) {
@@ -158,12 +193,24 @@ export function ScrapingProvider({ children }) {
 
     // Fetch initial jobs on mount
     useEffect(() => {
+        if (IS_READ_ONLY_MODE) {
+            setJobs({});
+            setAudioJobs([]);
+            return;
+        }
         refreshScraperJobs();
         refreshAudioJobs();
     }, [refreshScraperJobs, refreshAudioJobs]);
 
     // Poll for updates on active jobs
     useEffect(() => {
+        if (IS_READ_ONLY_MODE) {
+            if (scraperPollIntervalRef.current) {
+                clearInterval(scraperPollIntervalRef.current);
+                scraperPollIntervalRef.current = null;
+            }
+            return;
+        }
         const activeJobs = Object.entries(jobs).filter(
             ([, job]) => SCRAPER_ACTIVE_STATUSES.has(job.status)
         );
@@ -198,6 +245,13 @@ export function ScrapingProvider({ children }) {
     }, [jobs]);
 
     useEffect(() => {
+        if (IS_READ_ONLY_MODE) {
+            if (audioPollIntervalRef.current) {
+                clearInterval(audioPollIntervalRef.current);
+                audioPollIntervalRef.current = null;
+            }
+            return;
+        }
         const activeAudioJobs = audioJobs.filter(
             (job) => AUDIO_ACTIVE_STATUSES.has(job.status)
         );

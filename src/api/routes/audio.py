@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from ..config import (
     AUDIO_DIR,
@@ -29,6 +29,7 @@ from ..config import (
 )
 from ..database import dict_from_row, get_db
 from ..services.tts_provider import ENGLISH_VOICES, get_tts_provider
+from ..storage import build_audio_public_url, get_chapter_text
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -139,6 +140,10 @@ def _get_audio_paths(novel_slug: str, chapter_number: int) -> tuple[Path, Path]:
 
 def _relative_audio_url(novel_slug: str, chapter_number: int) -> str:
     return f"/audio/{novel_slug}/Chapter_{chapter_number:04d}.wav"
+
+
+def _resolve_persisted_audio_url(audio_key: Optional[str], audio_url: Optional[str]) -> Optional[str]:
+    return build_audio_public_url(audio_key) or audio_url
 
 
 def _audio_job_key(novel_slug: str, chapter_number: int) -> str:
@@ -326,7 +331,7 @@ def _load_chapter_content(novel_slug: str, chapter_number: int) -> tuple[int, st
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT c.id, c.content, c.content_path, c.content_url
+            SELECT c.id, c.content, c.content_path, c.content_url, c.r2_key
             FROM chapters c
             JOIN novels n ON c.novel_id = n.id
             WHERE n.slug = ? AND c.chapter_number = ?
@@ -338,15 +343,19 @@ def _load_chapter_content(novel_slug: str, chapter_number: int) -> tuple[int, st
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found in database")
 
-    content = chapter["content"]
-    if not content and chapter["content_path"]:
+    content = chapter.get("content")
+
+    if not content and chapter.get("r2_key"):
+        content = get_chapter_text(chapter["r2_key"])
+
+    if not content and chapter.get("content_path"):
         chapter_file = Path(chapter["content_path"])
         if chapter_file.exists():
             raw = chapter_file.read_text(encoding="utf-8")
             lines = raw.splitlines()
             content = "\n".join(lines[3:] if len(lines) > 3 else lines).strip()
 
-    if not content and chapter["content_url"]:
+    if not content and chapter.get("content_url"):
         try:
             response = httpx.get(chapter["content_url"], timeout=15)
             if response.status_code == 200:
@@ -520,7 +529,9 @@ def _serialize_audio_job(row: Optional[dict], live_job: Optional[dict] = None) -
     novel_slug = row["novel_slug"]
     chapter_number = row["chapter_number"]
     audio_path, _ = _get_audio_paths(novel_slug, chapter_number)
-    audio_exists = audio_path.exists()
+    local_audio_exists = audio_path.exists()
+    persisted_audio_url = _resolve_persisted_audio_url(row.get("audio_key"), row.get("audio_url"))
+    audio_exists = local_audio_exists or bool(persisted_audio_url)
     job_status = _build_job_status(live_job)
     stale_restart_failure = (
         _is_stale_restart_failure(row.get("status"), row.get("error"))
@@ -555,7 +566,7 @@ def _serialize_audio_job(row: Optional[dict], live_job: Optional[dict] = None) -
         "progress": round(max(inferred_progress, 0.0), 2),
         "provider": row.get("provider") or (live_job.get("provider") if live_job else None) or (TTS_PROVIDER if inferred_status != "not_found" else None),
         "voice": row.get("voice"),
-        "audio_url": row.get("audio_url") or (_relative_audio_url(novel_slug, chapter_number) if audio_exists else None),
+        "audio_url": persisted_audio_url or (_relative_audio_url(novel_slug, chapter_number) if local_audio_exists else None),
         "duration": row.get("duration") or live_job.get("duration") if live_job else row.get("duration"),
         "error": inferred_error,
         "exists": audio_exists,
@@ -640,6 +651,29 @@ async def list_voices_flat(provider: Optional[str] = None):
 async def stream_chapter_audio(novel_slug: str, chapter_number: int):
     audio_path, _ = _get_audio_paths(novel_slug, chapter_number)
     if not audio_path.exists():
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT c.audio_key, ca.audio_url
+                FROM chapters c
+                JOIN novels n ON c.novel_id = n.id
+                LEFT JOIN chapter_audio ca
+                    ON ca.novel_slug = n.slug
+                   AND ca.chapter_number = c.chapter_number
+                WHERE n.slug = ? AND c.chapter_number = ?
+                """,
+                (novel_slug, chapter_number),
+            )
+            row = dict_from_row(cursor.fetchone())
+
+        redirect_url = None
+        if row:
+            redirect_url = _resolve_persisted_audio_url(row.get("audio_key"), row.get("audio_url"))
+
+        if redirect_url:
+            return RedirectResponse(url=redirect_url, status_code=307)
+
         raise HTTPException(status_code=404, detail="Audio not generated yet. Use /generate first.")
 
     return FileResponse(
@@ -655,6 +689,17 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         cursor = conn.cursor()
         cursor.execute(
             """
+            SELECT c.audio_key, c.audio_path
+            FROM chapters c
+            JOIN novels n ON c.novel_id = n.id
+            WHERE n.slug = ? AND c.chapter_number = ?
+            """,
+            (novel_slug, chapter_number),
+        )
+        chapter_row = dict_from_row(cursor.fetchone())
+
+        cursor.execute(
+            """
             SELECT status, audio_url, duration, progress, error
                  , provider, voice
             FROM chapter_audio
@@ -664,23 +709,40 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         )
         row = cursor.fetchone()
 
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS timing_count
+            FROM audio_timings
+            WHERE novel_slug = ? AND chapter_number = ?
+            """,
+            (novel_slug, chapter_number),
+        )
+        timing_row = dict_from_row(cursor.fetchone())
+
     audio_path, timing_path = _get_audio_paths(novel_slug, chapter_number)
+    chapter_audio_key = chapter_row.get("audio_key") if chapter_row else None
+    chapter_audio_url = build_audio_public_url(chapter_audio_key)
     job = tts_jobs.get(_audio_job_key(novel_slug, chapter_number), {})
-    audio_exists = audio_path.exists()
-    timing_exists = timing_path.exists()
+    local_audio_exists = audio_path.exists()
+    has_any_audio = bool(local_audio_exists or chapter_audio_url)
+    timing_exists = bool((timing_row or {}).get("timing_count")) or timing_path.exists()
     job_status = _build_job_status(job)
 
     if row:
         stale_restart_failure = (
             _is_stale_restart_failure(row["status"], row["error"])
-            and not audio_exists
+            and not has_any_audio
             and not job_status.get("job_status")
         )
 
-        inferred_audio_url = row["audio_url"] or (_relative_audio_url(novel_slug, chapter_number) if audio_exists else None)
+        inferred_audio_url = (
+            chapter_audio_url
+            or row["audio_url"]
+            or (_relative_audio_url(novel_slug, chapter_number) if local_audio_exists else None)
+        )
         inferred_status = (
             "completed"
-            if audio_exists
+            if has_any_audio
             else (
                 "cancelled"
                 if stale_restart_failure
@@ -689,15 +751,15 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         )
         live_progress = (
             100
-            if audio_exists
+            if has_any_audio
             else (0 if stale_restart_failure else job_status.get("progress", row["progress"] or 0))
         )
         inferred_error = None if stale_restart_failure else row["error"]
         return {
-            "exists": audio_exists,
-            "audio_only": audio_exists,
+            "exists": has_any_audio,
+            "audio_only": has_any_audio,
             "timing_exists": timing_exists,
-            "generating": inferred_status == "generating" and not audio_exists,
+            "generating": inferred_status == "generating" and not has_any_audio,
             "status": inferred_status,
             "audio_url": inferred_audio_url,
             "duration": row["duration"],
@@ -709,14 +771,14 @@ async def check_audio_status(novel_slug: str, chapter_number: int):
         }
 
     return {
-        "exists": audio_exists,
-        "audio_only": audio_exists,
+        "exists": has_any_audio,
+        "audio_only": has_any_audio,
         "timing_exists": timing_exists,
-        "generating": job.get("status") == "generating" and not audio_exists,
-        "status": "completed" if audio_exists else ("generating" if job.get("status") == "generating" else "not_found"),
-        "audio_url": _relative_audio_url(novel_slug, chapter_number) if audio_exists else None,
+        "generating": job.get("status") == "generating" and not has_any_audio,
+        "status": "completed" if has_any_audio else ("generating" if job.get("status") == "generating" else "not_found"),
+        "audio_url": chapter_audio_url or (_relative_audio_url(novel_slug, chapter_number) if local_audio_exists else None),
         "duration": job.get("duration"),
-        "progress": 100 if audio_exists else job_status.get("progress", job.get("progress", 0)),
+        "progress": 100 if has_any_audio else job_status.get("progress", job.get("progress", 0)),
         "error": job.get("error"),
         "provider": job.get("provider"),
         **job_status,
@@ -730,6 +792,7 @@ async def list_audio_jobs(novel_slug: Optional[str] = None):
         query = """
             SELECT
                 ca.*,
+                c.audio_key,
                 n.title AS novel_title,
                 c.title AS chapter_title
             FROM chapter_audio ca
@@ -1135,12 +1198,17 @@ async def generate_chapter_audio(
         cursor.execute(
             """
             SELECT status, audio_url, duration, provider
-            FROM chapter_audio
-            WHERE novel_slug = ? AND chapter_number = ?
+                 , c.audio_key
+            FROM chapter_audio ca
+            LEFT JOIN novels n ON n.slug = ca.novel_slug
+            LEFT JOIN chapters c
+                ON c.novel_id = n.id
+               AND c.chapter_number = ca.chapter_number
+            WHERE ca.novel_slug = ? AND ca.chapter_number = ?
             """,
             (novel_slug, chapter_number),
         )
-        existing = cursor.fetchone()
+        existing = dict_from_row(cursor.fetchone())
 
     if existing:
         if existing["status"] == "completed" and existing["provider"] == resolved_provider and not force:
@@ -1153,7 +1221,7 @@ async def generate_chapter_audio(
             return {
                 "status": "exists",
                 "message": "Audio already generated",
-                "audio_url": existing["audio_url"],
+                "audio_url": _resolve_persisted_audio_url(existing.get("audio_key"), existing.get("audio_url")),
                 "duration": existing["duration"],
                 "provider": resolved_provider,
             }
