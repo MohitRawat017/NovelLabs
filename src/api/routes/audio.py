@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import numpy as np
 import soundfile as sf
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
@@ -895,6 +896,38 @@ async def get_chapter_timings(novel_slug: str, chapter_number: int):
     _, timing_path = _get_audio_paths(novel_slug, chapter_number)
     if timing_path.exists():
         return json.loads(timing_path.read_text(encoding="utf-8"))
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT c.audio_key, ca.audio_url
+            FROM chapters c
+            JOIN novels n ON c.novel_id = n.id
+            LEFT JOIN chapter_audio ca
+                ON ca.novel_slug = n.slug
+               AND ca.chapter_number = c.chapter_number
+            WHERE n.slug = ? AND c.chapter_number = ?
+            """,
+            (novel_slug, chapter_number),
+        )
+        row = dict_from_row(cursor.fetchone())
+
+    redirect_url = None
+    if row:
+        redirect_url = _resolve_persisted_audio_url(row.get("audio_key"), row.get("audio_url"))
+
+    if redirect_url:
+        # Server-side proxy: fetch the JSON from R2 and return it directly.
+        # This avoids browser CORS issues since the browser only talks to our backend.
+        timing_url = redirect_url.rsplit(".", 1)[0] + ".json"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r2_response = await client.get(timing_url)
+            if r2_response.status_code == 200:
+                return r2_response.json()
+        except Exception as exc:
+            logging.warning("Failed to fetch timing JSON from R2 (%s): %s", timing_url, exc)
 
     raise HTTPException(status_code=404, detail="Timing data not found. Generate audio first.")
 

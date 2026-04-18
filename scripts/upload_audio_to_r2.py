@@ -90,19 +90,24 @@ def build_public_url(key: str) -> str:
     return f"https://{R2_AUDIO_BUCKET_NAME}.{R2_AUDIO_ACCOUNT_ID}.r2.dev/{key}"
 
 
-def upload_audio_file(filepath: Path, novel_slug: str, chapter_number: int) -> Optional[dict]:
+def upload_audio_file(filepath: Path, novel_slug: str, chapter_number: int, is_timing: bool = False) -> Optional[dict]:
     client = get_s3_client()
     if not client:
         return None
 
-    key = f"novels/{novel_slug}/audio/{chapter_number:04d}.wav"
+    if is_timing:
+        key = f"novels/{novel_slug}/audio/{chapter_number:04d}.json"
+        content_type = "application/json"
+    else:
+        key = f"novels/{novel_slug}/audio/{chapter_number:04d}.wav"
+        content_type = "audio/wav"
 
     try:
         client.upload_file(
             str(filepath),
             R2_AUDIO_BUCKET_NAME,
             key,
-            ExtraArgs={"ContentType": "audio/wav"},
+            ExtraArgs={"ContentType": content_type},
         )
         return {
             "audio_key": key,
@@ -189,15 +194,39 @@ def scan_audio_folders() -> list[dict]:
     return novels
 
 
+def get_existing_timings_in_r2(novel_slug: str) -> set[int]:
+    client = get_s3_client()
+    if not client:
+        return set()
+
+    existing: set[int] = set()
+    prefix = f"novels/{novel_slug}/audio/"
+
+    try:
+        paginator = client.get_paginator("list_objects_v2")
+        pages = paginator.paginate(Bucket=R2_AUDIO_BUCKET_NAME, Prefix=prefix)
+        for page in pages:
+            for obj in page.get("Contents", []):
+                match = re.search(r"audio/(\d+)\.json$", obj["Key"])
+                if match:
+                    existing.add(int(match.group(1)))
+    except Exception as exc:
+        print(f"[WARN] Could not list existing timings for {novel_slug}: {exc}")
+
+    return existing
+
+
 def upload_novel_audio(novel: dict, http_client: httpx.Client, limit: Optional[int] = None) -> None:
     audio_files = novel["audio_files"][:limit] if limit else novel["audio_files"]
     total = len(audio_files)
     success = 0
     fail = 0
     skipped = 0
+    timings_uploaded = 0
 
     existing_chapters = get_existing_audio_in_r2(novel["slug"])
-    print(f"[INFO] Found {len(existing_chapters)} audio files already in R2 for {novel['slug']}")
+    existing_timings = get_existing_timings_in_r2(novel["slug"])
+    print(f"[INFO] Found {len(existing_chapters)} audio and {len(existing_timings)} timing files already in R2 for {novel['slug']}")
 
     for index, filepath in enumerate(audio_files, start=1):
         match = re.search(r"Chapter_(\d+)\.wav$", filepath.name)
@@ -205,10 +234,19 @@ def upload_novel_audio(novel: dict, http_client: httpx.Client, limit: Optional[i
             continue
 
         chapter_number = int(match.group(1))
+
+        # Always attempt to upload the timing JSON, even if audio is already in R2
+        timing_filepath = filepath.with_name(f"Chapter_{chapter_number:04d}_timing.json")
+        if timing_filepath.exists() and chapter_number not in existing_timings:
+            result = upload_audio_file(timing_filepath, novel["slug"], chapter_number, is_timing=True)
+            if result:
+                timings_uploaded += 1
+                print(f"  [JSON] Uploaded timing for chapter {chapter_number}")
+
         if chapter_number in existing_chapters:
             skipped += 1
             if index % 200 == 0 or index == total:
-                print(f"  Progress: {index}/{total} (new:{success} skip:{skipped} fail:{fail})")
+                print(f"  Progress: {index}/{total} (new:{success} skip:{skipped} fail:{fail} json:{timings_uploaded})")
             continue
 
         storage = upload_audio_file(filepath, novel["slug"], chapter_number)
@@ -224,11 +262,11 @@ def upload_novel_audio(novel: dict, http_client: httpx.Client, limit: Optional[i
             fail += 1
 
         if index % 100 == 0 or index == total:
-            print(f"  Progress: {index}/{total} (new:{success} skip:{skipped} fail:{fail})")
+            print(f"  Progress: {index}/{total} (new:{success} skip:{skipped} fail:{fail} json:{timings_uploaded})")
 
         time.sleep(0.02)
 
-    print(f"[DONE] {novel['slug']}: {success} new, {skipped} skipped, {fail} failed")
+    print(f"[DONE] {novel['slug']}: {success} new, {skipped} skipped, {fail} failed, {timings_uploaded} timings uploaded")
 
 
 def main():
