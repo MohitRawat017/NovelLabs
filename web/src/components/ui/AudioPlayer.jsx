@@ -375,34 +375,9 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
         ? `${Math.min(generationInfo?.completed_chunks || 0, totalChunks)} / ${totalChunks} chunks processed`
         : 'Waiting for chunk progress...';
 
-    if (isMinimized) {
-        return (
-            <div className="fixed bottom-4 md:bottom-8 right-4 md:right-8 z-[100] flex items-center gap-3 p-2 pr-4 glass rounded-full border border-white/20 dark:border-white/10 shadow-2xl animate-in slide-in-from-bottom-5">
-                <button 
-                    className="w-10 h-10 rounded-full flex items-center justify-center bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 transition-all text-stone-600 dark:text-stone-300 border border-stone-200/50 dark:border-white/10" 
-                    onClick={() => setIsMinimized(false)}
-                >
-                    <ChevronUp size={18} />
-                </button>
-                <div className="flex flex-col">
-                    <span className="text-xs font-bold uppercase tracking-widest text-violet-600 dark:text-violet-400">Playing</span>
-                    <span className="text-sm font-medium text-stone-800 dark:text-stone-200 max-w-[120px] truncate">
-                        {chapterTitle || `Chapter ${chapterNumber}`}
-                    </span>
-                </div>
-                <button
-                    className={`w-10 h-10 ml-2 rounded-full flex items-center justify-center transition-all shadow-md text-white ${audioReady ? 'bg-gradient-to-r from-violet-500 to-indigo-500 hover:scale-105' : 'bg-stone-400 dark:bg-stone-600 cursor-not-allowed hidden'}`}
-                    onClick={togglePlay}
-                    disabled={!audioReady}
-                >
-                    {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-1" />}
-                </button>
-            </div>
-        );
-    }
-
     return (
-        <div className="fixed bottom-4 md:bottom-8 right-4 md:right-8 z-[100] w-[calc(100%-32px)] md:w-[360px] glass rounded-[32px] overflow-hidden border border-white/20 dark:border-white/10 shadow-2xl flex flex-col animate-in slide-in-from-bottom-8">
+        <>
+            {/* Always mounted so audioRef stays valid through minimize/restore */}
             {audioUrl && (
                 <audio
                     ref={audioRef}
@@ -410,6 +385,31 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                     preload="auto"
                 />
             )}
+
+            {isMinimized ? (
+                <div className="fixed bottom-4 md:bottom-8 right-4 md:right-8 z-[100] flex items-center gap-3 p-2 pr-4 glass rounded-full border border-white/20 dark:border-white/10 shadow-2xl animate-in slide-in-from-bottom-5">
+                    <button
+                        className="w-10 h-10 rounded-full flex items-center justify-center bg-white/50 dark:bg-white/5 hover:bg-stone-200 dark:hover:bg-white/10 transition-all text-stone-600 dark:text-stone-300 border border-stone-200/50 dark:border-white/10"
+                        onClick={() => setIsMinimized(false)}
+                    >
+                        <ChevronUp size={18} />
+                    </button>
+                    <div className="flex flex-col">
+                        <span className="text-xs font-bold uppercase tracking-widest text-violet-600 dark:text-violet-400">Playing</span>
+                        <span className="text-sm font-medium text-stone-800 dark:text-stone-200 max-w-[120px] truncate">
+                            {chapterTitle || `Chapter ${chapterNumber}`}
+                        </span>
+                    </div>
+                    <button
+                        className={`w-10 h-10 ml-2 rounded-full flex items-center justify-center transition-all shadow-md text-white ${audioReady ? 'bg-gradient-to-r from-violet-500 to-indigo-500 hover:scale-105' : 'bg-stone-400 dark:bg-stone-600 cursor-not-allowed hidden'}`}
+                        onClick={togglePlay}
+                        disabled={!audioReady}
+                    >
+                        {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-1" />}
+                    </button>
+                </div>
+            ) : (
+        <div className="fixed bottom-4 md:bottom-8 right-4 md:right-8 z-[100] w-[calc(100%-32px)] md:w-[360px] glass rounded-[32px] overflow-hidden border border-white/20 dark:border-white/10 shadow-2xl flex flex-col animate-in slide-in-from-bottom-8">
 
             <div className="flex items-center justify-between p-4 md:p-5 border-b border-stone-200/50 dark:border-white/10 bg-white/40 dark:bg-black/20">
                 <div className="flex flex-col">
@@ -558,7 +558,9 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                     </>
                 )}
             </div>
-        </div>
+            </div>
+            )}
+        </>
     );
 }
 
