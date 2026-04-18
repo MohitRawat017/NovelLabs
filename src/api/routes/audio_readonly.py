@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 
@@ -136,26 +138,62 @@ async def get_chapter_timings_readonly(novel_slug: str, chapter_number: int):
         )
         timings = cursor.fetchall()
 
-    if not timings:
-        raise HTTPException(status_code=404, detail="Timing data not found.")
-
-    chunks = [
-        {
-            "index": row["chunk_index"],
-            "text": row["text"],
-            "start": row["start_time"],
-            "end": row["end_time"],
+    if timings:
+        chunks = [
+            {
+                "index": row["chunk_index"],
+                "text": row["text"],
+                "start": row["start_time"],
+                "end": row["end_time"],
+            }
+            for row in timings
+        ]
+        total_duration = max(chunk["end"] for chunk in chunks)
+        return {
+            "novel_slug": novel_slug,
+            "chapter_number": chapter_number,
+            "total_duration": round(total_duration, 3),
+            "chunk_count": len(chunks),
+            "chunks": chunks,
         }
-        for row in timings
-    ]
-    total_duration = max(chunk["end"] for chunk in chunks)
-    return {
-        "novel_slug": novel_slug,
-        "chapter_number": chapter_number,
-        "total_duration": round(total_duration, 3),
-        "chunk_count": len(chunks),
-        "chunks": chunks,
-    }
+
+    # DB has no timings — fall back to the JSON file uploaded to R2.
+    # Look up the chapter's audio_key so we can derive the .json sibling URL.
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT c.audio_key, ca.audio_url
+            FROM chapters c
+            JOIN novels n ON c.novel_id = n.id
+            LEFT JOIN chapter_audio ca
+                ON ca.novel_slug = n.slug
+               AND ca.chapter_number = c.chapter_number
+            WHERE n.slug = ? AND c.chapter_number = ?
+            """,
+            (novel_slug, chapter_number),
+        )
+        row = dict_from_row(cursor.fetchone())
+
+    audio_url = None
+    if row:
+        audio_url = build_audio_public_url(row.get("audio_key")) or row.get("audio_url")
+
+    if audio_url:
+        # Swap .wav extension for .json to get the timing file URL.
+        timing_url = audio_url.rsplit(".", 1)[0] + ".json"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r2_response = await client.get(timing_url)
+            if r2_response.status_code == 200:
+                return r2_response.json()
+            logging.warning(
+                "R2 timing JSON returned %d for %s", r2_response.status_code, timing_url
+            )
+        except Exception as exc:
+            logging.warning("Failed to fetch timing JSON from R2 (%s): %s", timing_url, exc)
+
+    raise HTTPException(status_code=404, detail="Timing data not found.")
 
 
 @router.get("/health")
