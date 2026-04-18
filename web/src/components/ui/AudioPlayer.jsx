@@ -408,7 +408,6 @@ function AudioPlayer({ novelSlug, chapterNumber, chapterTitle, settings, onClose
                     ref={audioRef}
                     src={audioUrl}
                     preload="auto"
-                    crossOrigin="anonymous"
                 />
             )}
 

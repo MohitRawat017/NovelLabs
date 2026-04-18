@@ -175,15 +175,16 @@ def scan_audio_folders() -> list[dict]:
         if not audio_files:
             continue
 
+        slug = folder.name.lower()  # normalise to match DB slug convention (always lowercase)
         novels.append(
             {
-                "slug": folder.name,
+                "slug": slug,
                 "folder": folder,
                 "audio_files": audio_files,
                 "audio_count": len(audio_files),
             }
         )
-        print(f"[FOUND] {folder.name}: {len(audio_files)} audio files")
+        print(f"[FOUND] {folder.name} (slug: {slug}): {len(audio_files)} audio files")
 
     return novels
 
