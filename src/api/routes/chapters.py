@@ -13,7 +13,7 @@ from typing import Optional, List
 from ..database import get_db, dict_from_row, list_from_rows
 from ..config import NOVEL_OUTPUT_DIR, READ_ONLY_MODE
 from ..models.schemas import ChapterResponse, ChapterListResponse, ChapterContentResponse
-from ..storage import build_audio_public_url, get_chapter_text
+from ..storage import build_audio_public_url, get_chapter_text, get_chapter_text_by_convention
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -78,11 +78,28 @@ def _read_local_content(content_path: Optional[str]) -> str:
         return content
 
 
-async def _resolve_chapter_content(chapter: dict) -> str:
-    # Production-first read order: key-based object store -> URL -> local path -> DB fallback.
+async def _resolve_chapter_content(
+    chapter: dict,
+    novel_slug: str = "",
+    chapter_number: int = 0,
+) -> str:
+    # Production-first read order:
+    #   1. Explicit r2_key override (DB column, if set)
+    #   2. Conventional R2 key (deterministic from slug + chapter_number)
+    #   3. content_url (HTTP fetch)
+    #   4. Local filesystem (content_path)
+    #   5. DB content column (inline text)
+
+    # 1. Explicit DB r2_key (legacy / manual override)
     r2_key = chapter.get("r2_key")
     if r2_key:
         text = get_chapter_text(r2_key)
+        if text:
+            return text
+
+    # 2. Deterministic conventional key — no DB column needed
+    if novel_slug and chapter_number > 0:
+        text = get_chapter_text_by_convention(novel_slug, chapter_number)
         if text:
             return text
 
@@ -103,19 +120,38 @@ async def _resolve_chapter_content(chapter: dict) -> str:
     return chapter.get("content") or ""
 
 
+# Track which novels have already been synced this session to avoid
+# re-upserting hundreds of rows on every request.
+_synced_novel_ids: set[int] = set()
+
+
 def sync_chapters_for_novel(novel_id: int, data_path: str):
-    """Sync chapters from filesystem to database for a novel"""
+    """Sync chapters from filesystem to database for a novel.
+    
+    Runs at most once per novel per backend lifetime (cached in-memory).
+    """
+    if novel_id in _synced_novel_ids:
+        return 0
+
     data_dir = Path(data_path)
     
     if not data_dir.exists():
+        _synced_novel_ids.add(novel_id)
         return 0
     
     chapter_files = sorted(data_dir.glob("Chapter_*.txt"))
+    total_files = len(chapter_files)
+    logger.info(
+        "Syncing %s chapter files for novel_id=%s from %s",
+        total_files,
+        novel_id,
+        data_dir,
+    )
     
     with get_db() as conn:
         cursor = conn.cursor()
         
-        for chapter_file in chapter_files:
+        for index, chapter_file in enumerate(chapter_files, start=1):
             # Extract chapter number from filename (Chapter_0001.txt)
             match = re.search(r'Chapter_(\d+)', chapter_file.name)
             if not match:
@@ -157,7 +193,15 @@ def sync_chapters_for_novel(novel_id: int, data_path: str):
                     audio_path = EXCLUDED.audio_path,
                     word_count = EXCLUDED.word_count
             ''', (novel_id, chapter_number, title, str(chapter_file), audio_path, word_count))
-    
+
+            if index == 1 or index == total_files or index % 250 == 0:
+                logger.info(
+                    "Synced chapter metadata %s/%s for novel_id=%s",
+                    index,
+                    total_files,
+                    novel_id,
+                )
+    _synced_novel_ids.add(novel_id)
     return len(chapter_files)
 
 
@@ -213,6 +257,11 @@ async def update_chapter_content_url(slug: str, chapter_number: int, data: Conte
     Local-first runs read chapter text from the filesystem. This endpoint is
     kept for backward compatibility only.
     """
+    if READ_ONLY_MODE:
+        raise HTTPException(
+            status_code=403,
+            detail="This instance is read-only. Run the upload script against your local writable backend.",
+        )
     safe_url = _validate_content_url(data.content_url)
     with get_db() as conn:
         cursor = conn.cursor()
@@ -245,7 +294,13 @@ async def update_chapter_storage(slug: str, chapter_number: int, data: ContentSt
     Update canonical chapter storage metadata.
 
     Intended for local ingestion/upload pipeline use, not public client writes.
+    Run the upload script against the local writable backend (postgres, READ_ONLY_MODE=false).
     """
+    if READ_ONLY_MODE:
+        raise HTTPException(
+            status_code=403,
+            detail="This instance is read-only. Run the upload script against your local writable backend.",
+        )
     chapter_updates = {}
 
     if data.r2_key is not None:
@@ -591,7 +646,11 @@ async def get_chapter(chapter_id: int):
         if not chapter:
             raise HTTPException(status_code=404, detail="Chapter not found")
 
-        content = await _resolve_chapter_content(chapter)
+        content = await _resolve_chapter_content(
+            chapter,
+            novel_slug=chapter.get('novel_slug', ''),
+            chapter_number=chapter.get('chapter_number', 0),
+        )
 
         cursor.execute(
             '''
@@ -667,7 +726,11 @@ async def get_chapter_by_number(slug: str, chapter_number: int):
         if not chapter:
             raise HTTPException(status_code=404, detail="Chapter not found")
 
-        content = await _resolve_chapter_content(chapter)
+        content = await _resolve_chapter_content(
+            chapter,
+            novel_slug=slug,
+            chapter_number=chapter_number,
+        )
 
         cursor.execute(
             '''

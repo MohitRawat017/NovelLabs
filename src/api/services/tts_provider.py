@@ -131,7 +131,8 @@ class KokoroProvider(TTSProvider):
                 chunks.append(np.asarray(audio, dtype=np.float32))
 
             if not chunks:
-                raise RuntimeError("Kokoro returned no audio chunks")
+                logger.warning("Kokoro returned no audio chunks for this text — inserting silence")
+                return np.zeros(int(self.sample_rate * 0.5), dtype=np.float32)
 
             if len(chunks) == 1:
                 return chunks[0]

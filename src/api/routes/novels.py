@@ -252,11 +252,17 @@ async def reset_database(
 def sync_novels_to_db():
     """Sync filesystem novels to database"""
     novels = scan_novels_from_filesystem()
+    chapters_synced = 0
     
     with get_db() as conn:
         cursor = conn.cursor()
         
         for novel in novels:
+            logger.info(
+                "Syncing filesystem novel '%s' (%s local chapters)",
+                novel["slug"],
+                novel["chapter_count"],
+            )
             # Check if novel exists
             cursor.execute('SELECT id, chapter_count, source_toc_url FROM novels WHERE slug = ?', (novel['slug'],))
             existing = cursor.fetchone()
@@ -288,6 +294,42 @@ def sync_novels_to_db():
                     novel.get('source_toc_url'),
                     novel['last_updated'],
                 ))
+
+            cursor.execute('SELECT id, chapter_count, source_toc_url FROM novels WHERE slug = ?', (novel['slug'],))
+            synced_novel = cursor.fetchone()
+            if not synced_novel:
+                continue
+
+            # Import chapter rows alongside novel metadata so local migration
+            # endpoints can PATCH storage metadata immediately after sync.
+            from .chapters import sync_chapters_for_novel
+
+            conn.commit()
+            synced_count = sync_chapters_for_novel(synced_novel['id'], novel['data_path'])
+            chapters_synced += synced_count
+            logger.info(
+                "Seeded %s chapter rows for '%s'",
+                synced_count,
+                novel["slug"],
+            )
+
+            current_count = int(synced_novel['chapter_count'] or 0)
+            if synced_novel['source_toc_url']:
+                desired_count = max(current_count, synced_count)
+            else:
+                desired_count = synced_count
+
+            if desired_count != current_count:
+                cursor.execute(
+                    '''
+                    UPDATE novels
+                    SET chapter_count = ?
+                    WHERE id = ?
+                    ''',
+                    (desired_count, synced_novel['id'])
+                )
+
+    logger.info("Filesystem sync seeded %s novels and %s chapter rows", len(novels), chapters_synced)
     
     return len(novels)
 

@@ -29,7 +29,7 @@ from ..config import (
 )
 from ..database import dict_from_row, get_db
 from ..services.tts_provider import ENGLISH_VOICES, get_tts_provider
-from ..storage import build_audio_public_url, get_chapter_text
+from ..storage import build_audio_public_url, get_chapter_text, get_chapter_text_by_convention
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -347,6 +347,10 @@ def _load_chapter_content(novel_slug: str, chapter_number: int) -> tuple[int, st
 
     if not content and chapter.get("r2_key"):
         content = get_chapter_text(chapter["r2_key"])
+
+    # Deterministic conventional key — no DB column needed
+    if not content:
+        content = get_chapter_text_by_convention(novel_slug, chapter_number) or ""
 
     if not content and chapter.get("content_path"):
         chapter_file = Path(chapter["content_path"])
@@ -1197,7 +1201,7 @@ async def generate_chapter_audio(
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT status, audio_url, duration, provider
+            SELECT ca.status, ca.audio_url, ca.duration, ca.provider
                  , c.audio_key
             FROM chapter_audio ca
             LEFT JOIN novels n ON n.slug = ca.novel_slug
@@ -1361,11 +1365,8 @@ def run_tts_generation(
         silence_duration = 0.3
         silence = np.zeros(int(provider.sample_rate * silence_duration), dtype=np.float32)
 
-        _MAX_PAUSE_SECONDS = 1800  # 30 minutes
-
-        # Single executor for all chunk synthesis — avoids creating/destroying 85 OS threads.
-        _synth_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
+        # Single executor wraps the entire loop — shut it down once after all chunks.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _synth_executor:
           for idx, chunk in enumerate(chunks):
             pause_started = time.monotonic()
             while tts_jobs.get(job_key, {}).get("status") == "paused":
@@ -1407,12 +1408,13 @@ def run_tts_generation(
                 }
             )
             logger.info(
-                "TTS progress %s chapter %s: starting chunk %s/%s (%.2f%%)",
+                "TTS progress %s chapter %s: starting chunk %s/%s (%.2f%%) [Device: %s]",
                 novel_slug,
                 chapter_number,
                 idx + 1,
                 len(chunks),
                 progress,
+                getattr(provider, "device", "unknown"),
             )
             _save_audio_metadata(
                 novel_slug,
@@ -1434,6 +1436,7 @@ def run_tts_generation(
                     f"{idx + 1}/{len(chunks)}. The model may be stuck — use POST /api/audio/reset-provider "
                     "and restart the backend to recover."
                 )
+
             if tts_jobs.get(job_key, {}).get("status") == "cancelled":
                 _mark_audio_job_cancelled(
                     job_key,
@@ -1510,11 +1513,10 @@ def run_tts_generation(
             )
             audio_segments.append(audio)
             current_time += duration + silence_duration
-        finally:
-            _synth_executor.shutdown(wait=True)
 
         if not audio_segments:
             raise ValueError("No audio segments were generated")
+
 
         combined = []
         for idx, segment in enumerate(audio_segments):
